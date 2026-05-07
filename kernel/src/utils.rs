@@ -1,6 +1,12 @@
 //! Various utility functions/macros used throughout the kernel
 use std::borrow::Cow;
-use std::ops::Deref;
+#[cfg(any(
+    unix,
+    windows,
+    target_os = "redox",
+    target_os = "wasi",
+    target_os = "hermit"
+))]
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -28,6 +34,13 @@ pub(crate) fn try_parse_uri(uri: impl AsRef<str>) -> DeltaResult<Url> {
     let uri = uri.as_ref();
     let uri_type = resolve_uri_type(uri)?;
     let url = match uri_type {
+        #[cfg(any(
+            unix,
+            windows,
+            target_os = "redox",
+            target_os = "wasi",
+            target_os = "hermit"
+        ))]
         UriType::LocalPath(path) => {
             if !path.exists() {
                 // When we support writes, create a directory if we can
@@ -60,6 +73,13 @@ pub(crate) fn try_parse_uri(uri: impl AsRef<str>) -> DeltaResult<Url> {
 #[allow(unused)]
 #[derive(Debug)]
 enum UriType {
+    #[cfg(any(
+        unix,
+        windows,
+        target_os = "redox",
+        target_os = "wasi",
+        target_os = "hermit"
+    ))]
     LocalPath(PathBuf),
     Url(Url),
 }
@@ -79,19 +99,82 @@ fn resolve_uri_type(table_uri: impl AsRef<str>) -> DeltaResult<UriType> {
     if let Ok(url) = Url::parse(&table_uri) {
         let scheme = url.scheme().to_string();
         if url.scheme() == "file" {
-            Ok(UriType::LocalPath(
-                url.to_file_path()
-                    .map_err(|_| Error::invalid_table_location(table_uri))?,
-            ))
+            #[cfg(any(
+                unix,
+                windows,
+                target_os = "redox",
+                target_os = "wasi",
+                target_os = "hermit"
+            ))]
+            {
+                return Ok(UriType::LocalPath(
+                    url.to_file_path()
+                        .map_err(|_| Error::invalid_table_location(table_uri))?,
+                ));
+            }
+            #[cfg(not(any(
+                unix,
+                windows,
+                target_os = "redox",
+                target_os = "wasi",
+                target_os = "hermit"
+            )))]
+            {
+                return Err(Error::invalid_table_location(format!(
+                    "local file paths are not supported on this target: {table_uri}"
+                )));
+            }
         } else if scheme.len() == 1 {
             // NOTE this check is required to support absolute windows paths which may properly
             // parse as url we assume here that a single character scheme is a windows drive letter
-            Ok(UriType::LocalPath(PathBuf::from(table_uri.as_ref())))
+            #[cfg(any(
+                unix,
+                windows,
+                target_os = "redox",
+                target_os = "wasi",
+                target_os = "hermit"
+            ))]
+            {
+                return Ok(UriType::LocalPath(PathBuf::from(table_uri.as_ref())));
+            }
+            #[cfg(not(any(
+                unix,
+                windows,
+                target_os = "redox",
+                target_os = "wasi",
+                target_os = "hermit"
+            )))]
+            {
+                return Err(Error::invalid_table_location(format!(
+                    "local file paths are not supported on this target: {table_uri}"
+                )));
+            }
         } else {
             Ok(UriType::Url(url))
         }
     } else {
-        Ok(UriType::LocalPath(table_uri.deref().into()))
+        #[cfg(any(
+            unix,
+            windows,
+            target_os = "redox",
+            target_os = "wasi",
+            target_os = "hermit"
+        ))]
+        {
+            Ok(UriType::LocalPath(table_uri.as_ref().into()))
+        }
+        #[cfg(not(any(
+            unix,
+            windows,
+            target_os = "redox",
+            target_os = "wasi",
+            target_os = "hermit"
+        )))]
+        {
+            Err(Error::invalid_table_location(format!(
+                "local file paths are not supported on this target: {table_uri}"
+            )))
+        }
     }
 }
 

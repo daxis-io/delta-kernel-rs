@@ -75,9 +75,23 @@ extern crate self as delta_kernel;
 
 use std::any::Any;
 use std::cmp::Ordering;
+#[cfg(any(
+    unix,
+    windows,
+    target_os = "redox",
+    target_os = "wasi",
+    target_os = "hermit"
+))]
 use std::fs::DirEntry;
 use std::ops::Range;
 use std::sync::Arc;
+#[cfg(any(
+    unix,
+    windows,
+    target_os = "redox",
+    target_os = "wasi",
+    target_os = "hermit"
+))]
 use std::time::SystemTime;
 
 use bytes::Bytes;
@@ -230,6 +244,13 @@ impl PartialOrd for FileMeta {
     }
 }
 
+#[cfg(any(
+    unix,
+    windows,
+    target_os = "redox",
+    target_os = "wasi",
+    target_os = "hermit"
+))]
 impl TryFrom<DirEntry> for FileMeta {
     type Error = Error;
 
