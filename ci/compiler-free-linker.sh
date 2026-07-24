@@ -22,8 +22,13 @@ do
 done
 
 linker_args=()
+shared_output=false
 for argument in "$@"; do
   case "$argument" in
+    -shared)
+      shared_output=true
+      linker_args+=("$argument")
+      ;;
     -m64)
       linker_args+=("-m" "elf_x86_64")
       ;;
@@ -39,14 +44,23 @@ for argument in "$@"; do
   esac
 done
 
+startup_objects=(
+  "$system_lib/crti.o"
+  "$gcc_lib/crtbeginS.o"
+)
+linker_tail=(
+  "$gcc_lib/crtendS.o"
+  "$system_lib/crtn.o"
+)
+if [[ "$shared_output" == false ]]; then
+  startup_objects=("$system_lib/Scrt1.o" "${startup_objects[@]}")
+  linker_tail+=("--dynamic-linker=$dynamic_linker")
+fi
+
 exec ld.lld \
-  "$system_lib/Scrt1.o" \
-  "$system_lib/crti.o" \
-  "$gcc_lib/crtbeginS.o" \
+  "${startup_objects[@]}" \
   -L/lib/x86_64-linux-gnu \
   -L"$system_lib" \
   -L"$gcc_lib" \
   "${linker_args[@]}" \
-  "$gcc_lib/crtendS.o" \
-  "$system_lib/crtn.o" \
-  --dynamic-linker="$dynamic_linker"
+  "${linker_tail[@]}"
