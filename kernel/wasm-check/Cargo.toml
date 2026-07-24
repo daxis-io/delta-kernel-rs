@@ -1,0 +1,13 @@
+[package]
+name = "buoyant-kernel-wasm-check"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+buoyant_kernel = { path = "..", default-features = false, features = [
+  "arrow-58",
+  "internal-api",
+] }
