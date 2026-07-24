@@ -34,6 +34,9 @@ for argument in "$@"; do
       ;;
     -nodefaultlibs)
       ;;
+    -B*)
+      # GCC driver search hints are not linker arguments.
+      ;;
     -Wl,*)
       IFS=',' read -r -a forwarded <<<"${argument#-Wl,}"
       linker_args+=("${forwarded[@]}")
