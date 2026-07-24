@@ -1,7 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::sync::{Arc, LazyLock};
-use std::time::Instant;
 
 use tracing::{debug, error};
 
@@ -19,6 +18,7 @@ use crate::kernel_predicates::{
 use crate::scan::data_skipping::stats_schema::is_skipping_eligible_datatype;
 use crate::scan::metrics::ScanMetrics;
 use crate::schema::{DataType, SchemaRef, StructField, StructType};
+use crate::time::Instant;
 use crate::utils::require;
 use crate::{Engine, EngineData, Error, ExpressionEvaluator, PredicateEvaluator, RowVisitor as _};
 

@@ -1,7 +1,6 @@
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::Instant;
 
 use bytes::Bytes;
 use delta_kernel_derive::internal_api;
@@ -16,6 +15,7 @@ use crate::metrics::reporter::{
 };
 use crate::object_store::path::Path;
 use crate::object_store::{self, DynObjectStore, ObjectStoreExt as _, PutMode};
+use crate::time::Instant;
 use crate::{DeltaResult, Error, FileMeta, FileSlice, StorageHandler};
 
 /// Stream wrapper that emits a storage metric span when dropped.

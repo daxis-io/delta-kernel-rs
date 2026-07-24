@@ -5,11 +5,10 @@ use std::borrow::Cow;
 use std::ops::Deref;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
 use delta_kernel_derive::internal_api;
 use url::Url;
 
+use crate::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::{DeltaResult, Error};
 
 /// convenient way to return an error if a condition isn't true
