@@ -4,7 +4,7 @@ use bytes::Bytes;
 use futures::StreamExt as _;
 use url::Url;
 
-use super::{put_bytes, resolve_scope};
+use super::{drive_sync, put_bytes, resolve_scope};
 use crate::object_store::path::Path;
 use crate::object_store::DynObjectStore;
 // `ObjectStoreExt` is needed for `store.get()` etc. in arrow-58 mode where these methods moved
@@ -44,11 +44,12 @@ impl StorageHandler for SyncStorageHandler {
 
         // LocalFileSystem and InMemory do not return sorted listings, so we collect and sort
         // to give callers a deterministic order.
-        let mut metas: Vec<_> = futures::executor::block_on(
+        let mut metas: Vec<_> = drive_sync(
             store
                 .list_with_offset(Some(&prefix), &offset)
                 .collect::<Vec<_>>(),
-        )
+            "list prefetched objects",
+        )?
         .into_iter()
         .collect::<Result<_, _>>()?;
         metas.sort_unstable_by(|a, b| a.location.cmp(&b.location));
@@ -75,8 +76,11 @@ impl StorageHandler for SyncStorageHandler {
             .into_iter()
             .map(|(url, _range_opt)| {
                 let (s, _, path) = resolve_scope(store.as_ref(), &url)?;
-                let get_result = futures::executor::block_on(s.get(&path))?;
-                Ok(futures::executor::block_on(get_result.bytes())?)
+                let get_result = drive_sync(s.get(&path), "get prefetched file")??;
+                Ok(drive_sync(
+                    get_result.bytes(),
+                    "read prefetched file body",
+                )??)
             })
             .collect();
         Ok(Box::new(results.into_iter()))
@@ -92,7 +96,7 @@ impl StorageHandler for SyncStorageHandler {
 
     fn head(&self, url: &Url) -> DeltaResult<FileMeta> {
         let (store, _, path) = resolve_scope(self.store.as_ref(), url)?;
-        let meta = futures::executor::block_on(store.head(&path))?;
+        let meta = drive_sync(store.head(&path), "head prefetched file")??;
         Ok(FileMeta {
             location: url.clone(),
             last_modified: meta.last_modified.timestamp_millis(),
