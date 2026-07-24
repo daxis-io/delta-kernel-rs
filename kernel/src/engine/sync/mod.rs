@@ -5,18 +5,21 @@
 //! store (for example an `InMemory` cache) and is the only constructor available on
 //! `wasm32-unknown-unknown`.
 //!
-//! Async work is driven via [`futures::executor::block_on`], which is sufficient for stores
-//! that do not require a tokio reactor (`LocalFileSystem`, `InMemory`). Cloud-backed stores
-//! are not supported here: they can deadlock because `block_on` parks the calling thread
-//! with no reactor to wake it. Browser callers must asynchronously prefetch data into a
-//! cache-backed store before invoking the kernel's synchronous handlers.
+//! On native targets, async object-store calls are driven via [`futures::executor::block_on`].
+//! On `wasm32-unknown-unknown`, they are polled exactly once and must complete immediately.
+//! This prevents a pending future from parking the browser's only thread. Cloud-backed stores
+//! are therefore not supported here: browser callers must asynchronously prefetch data into
+//! an immediately-ready cache-backed store before invoking the kernel's synchronous handlers.
 //!
 //! [`DefaultEngine`]: crate::engine::default::DefaultEngine
 //! [`LocalFileSystem`]: crate::object_store::local::LocalFileSystem
 
+use std::future::Future;
 use std::sync::Arc;
 
 use bytes::Bytes;
+#[cfg(any(test, all(target_arch = "wasm32", target_os = "unknown")))]
+use futures::FutureExt as _;
 use itertools::Itertools;
 use tracing::debug;
 use url::Url;
@@ -56,9 +59,8 @@ impl SyncEngine {
         Self::new_inner(None)
     }
 
-    /// Create a SyncEngine backed by `store`. All I/O is performed synchronously via
-    /// [`futures::executor::block_on`]. See module docs for the deadlock caveat on
-    /// reactor-dependent stores.
+    /// Create a SyncEngine backed by `store`. See the module docs for the stricter
+    /// immediately-ready store contract on `wasm32-unknown-unknown`.
     pub fn new_with_store(store: Arc<DynObjectStore>) -> Self {
         Self::new_inner(Some(store))
     }
@@ -173,8 +175,11 @@ pub(super) fn get_bytes(
     location: &Url,
 ) -> DeltaResult<Bytes> {
     let (store, _, path) = resolve_scope(default_store, location)?;
-    let get_result = futures::executor::block_on(store.get(&path))?;
-    Ok(futures::executor::block_on(get_result.bytes())?)
+    let get_result = drive_sync(store.get(&path), "get prefetched object")??;
+    Ok(drive_sync(
+        get_result.bytes(),
+        "read prefetched object body",
+    )??)
 }
 
 /// Write `data` to `location` via [`resolve_scope`].
@@ -207,15 +212,39 @@ pub(super) fn put_bytes(
             ..Default::default()
         }
     };
-    futures::executor::block_on(store.put_opts(&object_path, data.into(), opts)).map_err(|e| {
-        match e {
-            crate::object_store::Error::AlreadyExists { .. } => {
-                Error::FileAlreadyExists(location.to_string())
-            }
-            other => Error::generic(other.to_string()),
+    drive_sync(
+        store.put_opts(&object_path, data.into(), opts),
+        "write synchronous object",
+    )?
+    .map_err(|e| match e {
+        crate::object_store::Error::AlreadyExists { .. } => {
+            Error::FileAlreadyExists(location.to_string())
         }
+        other => Error::generic(other.to_string()),
     })?;
     Ok(())
+}
+
+#[cfg(any(test, all(target_arch = "wasm32", target_os = "unknown")))]
+fn poll_immediate<F: Future>(future: F, operation: &str) -> DeltaResult<F::Output> {
+    future.now_or_never().ok_or_else(|| {
+        Error::generic(format!(
+            "SyncEngine {operation} yielded Pending on wasm32-unknown-unknown; \
+             browser handlers require an asynchronously prefetched, immediately-ready store"
+        ))
+    })
+}
+
+fn drive_sync<F: Future>(future: F, operation: &str) -> DeltaResult<F::Output> {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        poll_immediate(future, operation)
+    }
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        let _ = operation;
+        Ok(futures::executor::block_on(future))
+    }
 }
 
 /// Read each file as bytes and feed it to `try_create_from_bytes` to produce data batches.
@@ -252,6 +281,19 @@ where
 mod tests {
     use super::*;
     use crate::engine::tests::test_arrow_engine;
+
+    #[test]
+    fn browser_immediate_driver_never_parks_the_host_thread() {
+        assert_eq!(
+            poll_immediate(futures::future::ready(42), "ready test").unwrap(),
+            42
+        );
+
+        let error = poll_immediate(futures::future::pending::<()>(), "pending test")
+            .expect_err("a pending prefetched-store future must fail instead of parking");
+        assert!(error.to_string().contains("pending test"));
+        assert!(error.to_string().contains("yielded Pending"));
+    }
 
     #[test]
     fn test_sync_engine() {
