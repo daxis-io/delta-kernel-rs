@@ -70,11 +70,11 @@ object_store_12 = { package = "object_store", version = "0.12.3", optional = tru
 [target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
 rand = "0.9"
 uuid = { version = "1.18.0", features = ["v4", "fast-rng"] }
-object_store_13 = { package = "object_store", version = "0.13.2", optional = true, features = ["aws", "azure", "gcp", "http"] }
+object_store_13 = { package = "object_store", git = "https://github.com/daxis-io/arrow-rs-object-store", rev = "7c30f6973689b8d1af3ef0e1548490c61a5ac5c7", optional = true, features = ["aws", "azure", "gcp", "http"] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 uuid = { version = "1.18.0", default-features = false, features = ["std"] }
-object_store_13 = { package = "object_store", version = "0.13.2", default-features = false, optional = true }
+object_store_13 = { package = "object_store", git = "https://github.com/daxis-io/arrow-rs-object-store", rev = "7c30f6973689b8d1af3ef0e1548490c61a5ac5c7", default-features = false, optional = true }
 
 # arrow 57
 [dependencies.arrow_57]
@@ -91,12 +91,14 @@ optional = true
 # arrow 58 on native targets
 [target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies.arrow_58]
 package = "arrow"
-version = "58"
+git = "https://github.com/daxis-io/arrow-rs"
+rev = "ed6d9505df4404bae287870a1af8b75b604a8e6a"
 features = ["chrono-tz", "ffi", "json"]
 optional = true
 [target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies.parquet_58]
 package = "parquet"
-version = "58"
+git = "https://github.com/daxis-io/arrow-rs"
+rev = "ed6d9505df4404bae287870a1af8b75b604a8e6a"
 features = ["async", "object_store"]
 optional = true
 
@@ -104,13 +106,15 @@ optional = true
 # target-safe Arrow/Parquet backends supplied by the stack.
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies.arrow_58]
 package = "arrow"
-version = "58"
+git = "https://github.com/daxis-io/arrow-rs"
+rev = "ed6d9505df4404bae287870a1af8b75b604a8e6a"
 default-features = false
 features = ["chrono-tz", "ffi", "json"]
 optional = true
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies.parquet_58]
 package = "parquet"
-version = "58"
+git = "https://github.com/daxis-io/arrow-rs"
+rev = "ed6d9505df4404bae287870a1af8b75b604a8e6a"
 default-features = false
 features = [
   "arrow",
