@@ -70,11 +70,11 @@ object_store_12 = { package = "object_store", version = "0.12.3", optional = tru
 [target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
 rand = "0.9"
 uuid = { version = "1.18.0", features = ["v4", "fast-rng"] }
-object_store_13 = { package = "object_store", git = "https://github.com/daxis-io/arrow-rs-object-store", rev = "e3a57c148f7b12159b1f41b336f21bfc1df3cfaf", optional = true, features = ["aws", "azure", "gcp", "http"] }
+object_store_13 = { package = "object_store", git = "https://github.com/daxis-io/arrow-rs-object-store", rev = "54109e3e6797522ccb2ee5d43cad2a9cd0013074", optional = true, features = ["aws", "azure", "gcp", "http"] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 uuid = { version = "1.18.0", default-features = false, features = ["std"] }
-object_store_13 = { package = "object_store", git = "https://github.com/daxis-io/arrow-rs-object-store", rev = "e3a57c148f7b12159b1f41b336f21bfc1df3cfaf", default-features = false, optional = true }
+object_store_13 = { package = "object_store", git = "https://github.com/daxis-io/arrow-rs-object-store", rev = "54109e3e6797522ccb2ee5d43cad2a9cd0013074", default-features = false, optional = true }
 web-time = "1.1.0"
 
 # arrow 57
@@ -93,13 +93,13 @@ optional = true
 [target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies.arrow_58]
 package = "arrow"
 git = "https://github.com/daxis-io/arrow-rs"
-rev = "210fa7ad29d7913027fdb148ffd8fd082848d80d"
+rev = "39a02b83b6d7ddc41a3fc0dbe541604aebbe1fcc"
 features = ["chrono-tz", "ffi", "json"]
 optional = true
 [target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies.parquet_58]
 package = "parquet"
 git = "https://github.com/daxis-io/arrow-rs"
-rev = "210fa7ad29d7913027fdb148ffd8fd082848d80d"
+rev = "39a02b83b6d7ddc41a3fc0dbe541604aebbe1fcc"
 features = ["async", "object_store"]
 optional = true
 
@@ -108,14 +108,14 @@ optional = true
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies.arrow_58]
 package = "arrow"
 git = "https://github.com/daxis-io/arrow-rs"
-rev = "210fa7ad29d7913027fdb148ffd8fd082848d80d"
+rev = "39a02b83b6d7ddc41a3fc0dbe541604aebbe1fcc"
 default-features = false
 features = ["chrono-tz", "ffi", "json"]
 optional = true
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies.parquet_58]
 package = "parquet"
 git = "https://github.com/daxis-io/arrow-rs"
-rev = "210fa7ad29d7913027fdb148ffd8fd082848d80d"
+rev = "39a02b83b6d7ddc41a3fc0dbe541604aebbe1fcc"
 default-features = false
 features = [
   "arrow",
