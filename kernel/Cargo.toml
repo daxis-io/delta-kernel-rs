@@ -75,6 +75,7 @@ object_store_13 = { package = "object_store", git = "https://github.com/daxis-io
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 uuid = { version = "1.18.0", default-features = false, features = ["std"] }
 object_store_13 = { package = "object_store", git = "https://github.com/daxis-io/arrow-rs-object-store", rev = "e3a57c148f7b12159b1f41b336f21bfc1df3cfaf", default-features = false, optional = true }
+web-time = "1.1.0"
 
 # arrow 57
 [dependencies.arrow_57]

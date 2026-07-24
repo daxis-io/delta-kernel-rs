@@ -136,6 +136,7 @@ pub mod column_trie;
 #[cfg(not(feature = "internal-api"))]
 pub(crate) mod column_trie;
 pub mod kernel_predicates;
+pub(crate) mod time;
 pub(crate) mod utils;
 
 #[cfg(feature = "internal-api")]

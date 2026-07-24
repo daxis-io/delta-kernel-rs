@@ -2,7 +2,6 @@
 
 use std::str::FromStr as _;
 use std::sync::Arc;
-use std::time::Instant;
 
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
@@ -13,6 +12,7 @@ use uuid::Uuid;
 
 use super::MetricEvent;
 use crate::metrics::MetricId;
+use crate::time::Instant;
 
 /// Trait for reporting metrics events from Delta operations.
 ///
