@@ -5,11 +5,12 @@ use std::str::FromStr;
 
 use delta_kernel_derive::internal_api;
 use url::Url;
+#[cfg(test)]
 use uuid::Uuid;
 
 use crate::actions::visitors::InCommitTimestampVisitor;
 use crate::engine_data::RowVisitor;
-use crate::utils::require;
+use crate::utils::{new_uuid, require};
 use crate::{DeltaResult, Engine, Error, FileMeta, Version};
 
 /// How many characters a version tag has
@@ -365,7 +366,7 @@ impl ParsedLogPath<Url> {
         table_root: &Url,
         version: Version,
     ) -> DeltaResult<Self> {
-        let filename = format!("{:020}.checkpoint.{}.parquet", version, Uuid::new_v4());
+        let filename = format!("{:020}.checkpoint.{}.parquet", version, new_uuid());
         let path = Self::create_path(table_root, filename)?;
         if !path.is_checkpoint() {
             return Err(Error::internal_error(
@@ -411,7 +412,7 @@ impl ParsedLogPath<Url> {
 /// Sidecar paths should be URI-encoded. All characters in the filename here are Unreserved
 /// Characters, so we can just retain them. Ref: <https://www.ietf.org/rfc/rfc2396.txt>
 pub(crate) fn new_sidecar(table_root: &Url, version: Version) -> DeltaResult<(String, Url)> {
-    let filename = format!("{version:020}.checkpoint.{}.parquet", Uuid::new_v4());
+    let filename = format!("{version:020}.checkpoint.{}.parquet", new_uuid());
     let url = table_root
         .join(DELTA_LOG_DIR_WITH_SLASH)?
         .join(SIDECAR_DIR_WITH_SLASH)?
@@ -466,7 +467,7 @@ impl LogRoot {
         &self,
         version: Version,
     ) -> DeltaResult<ParsedLogPath<Url>> {
-        let uuid = uuid::Uuid::new_v4();
+        let uuid = new_uuid();
         let filename = format!("{version:020}.{uuid}.json");
         let path = self.log_root().join(STAGED_COMMITS_DIR)?.join(&filename)?;
         ParsedLogPath::try_from(path)?.ok_or_else(|| {

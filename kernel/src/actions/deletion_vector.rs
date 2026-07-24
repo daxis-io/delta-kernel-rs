@@ -86,7 +86,7 @@ impl DeletionVectorPath {
     pub(crate) fn new(table_path: Url, prefix: String) -> Self {
         Self {
             table_path,
-            uuid: uuid::Uuid::new_v4(),
+            uuid: crate::utils::new_uuid(),
             prefix,
         }
     }

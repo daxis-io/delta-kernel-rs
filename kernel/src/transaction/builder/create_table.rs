@@ -11,7 +11,6 @@ use std::sync::Arc;
 
 use itertools::Itertools;
 use url::Url;
-use uuid::Uuid;
 
 use crate::actions::{DomainMetadata, Metadata, Protocol};
 use crate::clustering::{create_clustering_domain_metadata, validate_clustering_columns};
@@ -44,6 +43,7 @@ use crate::table_properties::{
 use crate::transaction::create_table::CreateTableTransaction;
 use crate::transaction::data_layout::DataLayout;
 use crate::transaction::Transaction;
+use crate::utils::new_uuid;
 use crate::utils::{current_time_ms, try_parse_uri};
 use crate::{DeltaResult, Engine, Error, StorageHandler};
 
@@ -492,11 +492,11 @@ fn maybe_set_materialized_row_tracking_column_name_properties(
     }
     validated.properties.insert(
         MATERIALIZED_ROW_ID_COLUMN_NAME.to_string(),
-        format!("_row-id-col-{}", Uuid::new_v4()),
+        format!("_row-id-col-{}", new_uuid()),
     );
     validated.properties.insert(
         MATERIALIZED_ROW_COMMIT_VERSION_COLUMN_NAME.to_string(),
-        format!("_row-commit-version-col-{}", Uuid::new_v4()),
+        format!("_row-commit-version-col-{}", new_uuid()),
     );
 }
 

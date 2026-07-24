@@ -20,6 +20,29 @@ macro_rules! require {
 
 pub(crate) use require;
 
+/// Generate a process-local unique UUID without requiring ambient browser
+/// entropy.
+///
+/// Native builds retain random v4 UUIDs. The browser read profile uses a
+/// monotonically increasing, v4-shaped identifier for metrics and other
+/// in-process correlation. Browser writes are outside this profile.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub(crate) fn new_uuid() -> uuid::Uuid {
+    uuid::Uuid::new_v4()
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub(crate) fn new_uuid() -> uuid::Uuid {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_UUID: AtomicU64 = AtomicU64::new(1);
+    const VERSION_4_AND_VARIANT: u128 = 0x00000000_0000_4000_8000_000000000000;
+    const SEQUENCE_MASK: u64 = (1_u64 << 62) - 1;
+
+    let sequence = NEXT_UUID.fetch_add(1, Ordering::Relaxed) & SEQUENCE_MASK;
+    uuid::Uuid::from_u128(VERSION_4_AND_VARIANT | u128::from(sequence))
+}
+
 /// Try to parse string uri into a URL for a table path. This will do it's best to handle things
 /// like `/local/paths`, and even `../relative/paths`.
 #[allow(unused)]
