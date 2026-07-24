@@ -21,7 +21,6 @@ feature_graph="$(
 
 denied_packages=(
   aws-lc-sys
-  getrandom
   hyper
   liblzma-sys
   native-tls
