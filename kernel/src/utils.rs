@@ -1,6 +1,9 @@
 //! Various utility functions/macros used throughout the kernel
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use std::borrow::Cow;
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use std::ops::Deref;
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -47,6 +50,7 @@ pub(crate) fn new_uuid() -> uuid::Uuid {
 /// like `/local/paths`, and even `../relative/paths`.
 #[allow(unused)]
 #[internal_api]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub(crate) fn try_parse_uri(uri: impl AsRef<str>) -> DeltaResult<Url> {
     let uri = uri.as_ref();
     let uri_type = resolve_uri_type(uri)?;
@@ -80,8 +84,32 @@ pub(crate) fn try_parse_uri(uri: impl AsRef<str>) -> DeltaResult<Url> {
     Ok(url)
 }
 
+/// Parse a browser table location without compiling filesystem URL helpers.
+///
+/// Browser engines receive an asynchronously prefetched object store, so local
+/// paths and `file:` URLs are outside the read-only browser profile.
+#[allow(unused)]
+#[internal_api]
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub(crate) fn try_parse_uri(uri: impl AsRef<str>) -> DeltaResult<Url> {
+    let uri = uri.as_ref();
+    let normalized = if uri.ends_with('/') {
+        uri.to_owned()
+    } else {
+        format!("{uri}/")
+    };
+    let url = Url::parse(&normalized).map_err(|_| Error::invalid_table_location(uri))?;
+    if url.scheme() == "file" || url.scheme().len() == 1 {
+        return Err(Error::InvalidTableLocation(format!(
+            "Browser table locations must use a non-file absolute URL: {uri}"
+        )));
+    }
+    Ok(url)
+}
+
 #[allow(unused)]
 #[derive(Debug)]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 enum UriType {
     LocalPath(PathBuf),
     Url(Url),
@@ -92,6 +120,7 @@ enum UriType {
 ///
 /// Will return an error if the path is not valid.
 #[allow(unused)]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 fn resolve_uri_type(table_uri: impl AsRef<str>) -> DeltaResult<UriType> {
     let table_uri = table_uri.as_ref();
     let table_uri = if table_uri.ends_with('/') {
