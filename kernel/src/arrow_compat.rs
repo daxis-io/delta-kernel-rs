@@ -2,11 +2,20 @@
 
 #[cfg(feature = "arrow-58")]
 mod arrow_compat_shims {
-    pub use arrow_58 as arrow;
-    pub use parquet_58 as parquet;
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    pub use arrow_58_native as arrow;
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    pub use arrow_58_wasm as arrow;
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    pub use parquet_58_native as parquet;
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    pub use parquet_58_wasm as parquet;
 
     pub mod object_store {
-        pub use object_store_13::*;
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        pub use object_store_13_native::*;
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        pub use object_store_13_wasm::*;
     }
 }
 
