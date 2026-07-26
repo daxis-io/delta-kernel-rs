@@ -74,13 +74,21 @@ impl StorageHandler for SyncStorageHandler {
         let store = self.store.clone();
         let results: Vec<DeltaResult<Bytes>> = files
             .into_iter()
-            .map(|(url, _range_opt)| {
+            .map(|(url, range_opt)| {
                 let (s, _, path) = resolve_scope(store.as_ref(), &url)?;
-                let get_result = drive_sync(s.get(&path), "get prefetched file")??;
-                Ok(drive_sync(
-                    get_result.bytes(),
-                    "read prefetched file body",
-                )??)
+                match range_opt {
+                    Some(range) => Ok(drive_sync(
+                        s.get_range(&path, range),
+                        "read prefetched file range",
+                    )??),
+                    None => {
+                        let get_result = drive_sync(s.get(&path), "get prefetched file")??;
+                        Ok(drive_sync(
+                            get_result.bytes(),
+                            "read prefetched file body",
+                        )??)
+                    }
+                }
             })
             .collect();
         Ok(Box::new(results.into_iter()))
@@ -91,7 +99,9 @@ impl StorageHandler for SyncStorageHandler {
     }
 
     fn copy_atomic(&self, _src: &Url, _dest: &Url) -> DeltaResult<()> {
-        unimplemented!("SyncStorageHandler does not implement copy");
+        Err(Error::unsupported(
+            "SyncStorageHandler does not support atomic copy",
+        ))
     }
 
     fn head(&self, url: &Url) -> DeltaResult<FileMeta> {
@@ -211,6 +221,36 @@ mod tests {
         }
         assert_eq!(file_count, 1);
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_files_honors_requested_range_for_prefetched_store() {
+        let store = std::sync::Arc::new(InMemory::new());
+        let path = crate::object_store::path::Path::from("file.json");
+        store
+            .put(&path, bytes::Bytes::from_static(b"0123456789").into())
+            .await
+            .unwrap();
+
+        let storage = SyncStorageHandler::new(Some(store));
+        let url = Url::parse("memory:///file.json").unwrap();
+        let mut read = storage.read_files(vec![(url, Some(2..5))]).unwrap();
+
+        assert_eq!(read.next().unwrap().unwrap().as_ref(), b"234");
+        assert!(read.next().is_none());
+    }
+
+    #[test]
+    fn copy_atomic_returns_unsupported_instead_of_panicking() {
+        let storage = SyncStorageHandler::new(None);
+        let source = Url::parse("memory:///source").unwrap();
+        let destination = Url::parse("memory:///destination").unwrap();
+
+        let error = storage.copy_atomic(&source, &destination).unwrap_err();
+        assert!(
+            matches!(&error, Error::Unsupported(message) if message.contains("atomic copy")),
+            "unexpected error: {error}"
+        );
     }
 
     /// `list_from` against an [`ObjectStore`] must walk subdirectories, matching the local FS
