@@ -9,5 +9,6 @@ publish = false
 [dependencies]
 buoyant_kernel = { path = "..", default-features = false, features = [
   "arrow-58",
+  "daxis-browser-stack",
   "internal-api",
 ] }

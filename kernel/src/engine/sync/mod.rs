@@ -3,7 +3,7 @@
 //! All I/O goes through an [`ObjectStore`]. On native targets, [`SyncEngine::new`] uses a
 //! [`LocalFileSystem`] built lazily per URL. [`SyncEngine::new_with_store`] takes a supplied
 //! store (for example an `InMemory` cache) and is the only constructor available on
-//! `wasm32-unknown-unknown`.
+//! `wasm32-unknown-unknown` and the Daxis browser stack's native test profile.
 //!
 //! On native targets, async object-store calls are driven via [`futures::executor::block_on`].
 //! On `wasm32-unknown-unknown`, they are polled exactly once and must complete immediately.
@@ -26,7 +26,10 @@ use url::Url;
 
 use super::arrow_expression::ArrowEvaluationHandler;
 use crate::engine::arrow_data::ArrowEngineData;
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+#[cfg(all(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    any(not(feature = "daxis-browser-stack"), feature = "default-engine-base")
+))]
 use crate::object_store::local::LocalFileSystem;
 use crate::object_store::path::Path;
 use crate::object_store::DynObjectStore;
@@ -54,7 +57,10 @@ pub struct SyncEngine {
 
 impl SyncEngine {
     /// Create a SyncEngine that reads from the local filesystem via [`LocalFileSystem`].
-    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    #[cfg(all(
+        not(all(target_arch = "wasm32", target_os = "unknown")),
+        any(not(feature = "daxis-browser-stack"), feature = "default-engine-base")
+    ))]
     pub fn new() -> Self {
         Self::new_inner(None)
     }
@@ -119,14 +125,24 @@ pub(super) fn resolve_scope(
         return Ok((store.clone(), base_url, path));
     }
 
-    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    #[cfg(any(
+        all(target_arch = "wasm32", target_os = "unknown"),
+        all(
+            not(all(target_arch = "wasm32", target_os = "unknown")),
+            feature = "daxis-browser-stack",
+            not(feature = "default-engine-base")
+        )
+    ))]
     {
         return Err(Error::generic(format!(
-            "SyncEngine on wasm32-unknown-unknown requires an explicit prefetched store for {url}"
+            "SyncEngine in the browser profile requires an explicit prefetched store for {url}"
         )));
     }
 
-    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    #[cfg(all(
+        not(all(target_arch = "wasm32", target_os = "unknown")),
+        any(not(feature = "daxis-browser-stack"), feature = "default-engine-base")
+    ))]
     {
         if url.scheme() != "file" {
             return Err(Error::generic(format!(

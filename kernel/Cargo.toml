@@ -66,6 +66,10 @@ reqwest = { version = "0.13", default-features = false, optional = true, feature
 tokio = { version = "1.47", optional = true, features = ["rt-multi-thread"] }
 # both arrow versions below are optional and require object_store
 object_store_12 = { package = "object_store", version = "0.12.3", optional = true, features = ["aws", "azure", "gcp", "http"] }
+# Daxis-only stack dependencies are activated explicitly by `daxis-browser-stack`.
+object_store_13_stack = { package = "object_store", git = "https://github.com/daxis-io/arrow-rs-object-store", rev = "a04240eafdc5833e34fe21d4b348ee399177def6", default-features = false, optional = true }
+arrow_58_stack = { package = "arrow", git = "https://github.com/daxis-io/arrow-rs", rev = "518663f4fb39ec0be672718432bbd7bb8a5456fc", default-features = false, features = ["chrono-tz", "ffi", "json"], optional = true }
+parquet_58_stack = { package = "parquet", git = "https://github.com/daxis-io/arrow-rs", rev = "518663f4fb39ec0be672718432bbd7bb8a5456fc", default-features = false, features = ["arrow", "async", "base64", "brotli", "flate2-zlib-rs", "lz4", "object_store", "simdutf8", "snap", "zstd"], optional = true }
 
 [target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
 rand = "0.9"
@@ -74,7 +78,6 @@ object_store_13_native = { package = "object_store", version = "0.13.2", optiona
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 uuid = { version = "1.18.0", default-features = false, features = ["std"] }
-object_store_13_wasm = { package = "object_store", git = "https://github.com/daxis-io/arrow-rs-object-store", rev = "a04240eafdc5833e34fe21d4b348ee399177def6", default-features = false, optional = true }
 web-time = "1.1.0"
 
 # arrow 57
@@ -101,34 +104,6 @@ version = "=58.3.0"
 features = ["async", "object_store"]
 optional = true
 
-# The browser profile retains the logical codec surface while relying on
-# target-safe Arrow/Parquet backends supplied by the stack.
-[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies.arrow_58_wasm]
-package = "arrow"
-git = "https://github.com/daxis-io/arrow-rs"
-rev = "518663f4fb39ec0be672718432bbd7bb8a5456fc"
-default-features = false
-features = ["chrono-tz", "ffi", "json"]
-optional = true
-[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies.parquet_58_wasm]
-package = "parquet"
-git = "https://github.com/daxis-io/arrow-rs"
-rev = "518663f4fb39ec0be672718432bbd7bb8a5456fc"
-default-features = false
-features = [
-  "arrow",
-  "async",
-  "base64",
-  "brotli",
-  "flate2-zlib-rs",
-  "lz4",
-  "object_store",
-  "simdutf8",
-  "snap",
-  "zstd",
-]
-optional = true
-
 [features]
 # no default features
 default = []
@@ -138,7 +113,7 @@ internal-api = []
 prettyprint = [
   "arrow_57?/prettyprint",
   "arrow_58_native?/prettyprint",
-  "arrow_58_wasm?/prettyprint",
+  "arrow_58_stack?/prettyprint",
 ]
 # test-utils exposes test-only constructors for downstream crate tests
 test-utils = ["prettyprint"]
@@ -152,14 +127,17 @@ need-arrow = [] # need-arrow is a marker that the feature needs arrow dep
 arrow-57 = ["dep:arrow_57", "dep:parquet_57", "dep:object_store_12"]
 arrow-58 = [
   "dep:arrow_58_native",
-  "dep:arrow_58_wasm",
   "dep:parquet_58_native",
-  "dep:parquet_58_wasm",
   "dep:object_store_13_native",
-  "dep:object_store_13_wasm",
   "arrow-conversion",
   "arrow-expression",
   "futures",
+]
+daxis-browser-stack = [
+  "arrow-58",
+  "dep:arrow_58_stack",
+  "dep:parquet_58_stack",
+  "dep:object_store_13_stack",
 ]
 arrow-conversion = ["need-arrow"]
 arrow-expression = ["need-arrow"]

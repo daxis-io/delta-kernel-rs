@@ -2,22 +2,71 @@
 
 #[cfg(feature = "arrow-58")]
 mod arrow_compat_shims {
-    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    #[cfg(all(
+        not(all(target_arch = "wasm32", target_os = "unknown")),
+        any(not(feature = "daxis-browser-stack"), feature = "default-engine-base")
+    ))]
     pub use arrow_58_native as arrow;
-    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-    pub use arrow_58_wasm as arrow;
-    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    #[cfg(all(
+        not(all(target_arch = "wasm32", target_os = "unknown")),
+        feature = "daxis-browser-stack",
+        not(feature = "default-engine-base")
+    ))]
+    pub use arrow_58_stack as arrow;
+    #[cfg(all(
+        target_arch = "wasm32",
+        target_os = "unknown",
+        feature = "daxis-browser-stack"
+    ))]
+    pub use arrow_58_stack as arrow;
+    #[cfg(all(
+        not(all(target_arch = "wasm32", target_os = "unknown")),
+        any(not(feature = "daxis-browser-stack"), feature = "default-engine-base")
+    ))]
     pub use parquet_58_native as parquet;
-    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-    pub use parquet_58_wasm as parquet;
+    #[cfg(all(
+        not(all(target_arch = "wasm32", target_os = "unknown")),
+        feature = "daxis-browser-stack",
+        not(feature = "default-engine-base")
+    ))]
+    pub use parquet_58_stack as parquet;
+    #[cfg(all(
+        target_arch = "wasm32",
+        target_os = "unknown",
+        feature = "daxis-browser-stack"
+    ))]
+    pub use parquet_58_stack as parquet;
 
     pub mod object_store {
-        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        #[cfg(all(
+            not(all(target_arch = "wasm32", target_os = "unknown")),
+            any(not(feature = "daxis-browser-stack"), feature = "default-engine-base")
+        ))]
         pub use object_store_13_native::*;
-        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-        pub use object_store_13_wasm::*;
+        #[cfg(all(
+            not(all(target_arch = "wasm32", target_os = "unknown")),
+            feature = "daxis-browser-stack",
+            not(feature = "default-engine-base")
+        ))]
+        pub use object_store_13_stack::*;
+        #[cfg(all(
+            target_arch = "wasm32",
+            target_os = "unknown",
+            feature = "daxis-browser-stack"
+        ))]
+        pub use object_store_13_stack::*;
     }
 }
+
+#[cfg(all(
+    target_arch = "wasm32",
+    target_os = "unknown",
+    feature = "arrow-58",
+    not(feature = "daxis-browser-stack")
+))]
+compile_error!(
+    "the Daxis stack requires `daxis-browser-stack` with `arrow-58` on wasm32-unknown-unknown"
+);
 
 #[cfg(all(feature = "arrow-57", not(feature = "arrow-58")))]
 mod arrow_compat_shims {
