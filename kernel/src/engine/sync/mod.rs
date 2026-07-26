@@ -1,28 +1,32 @@
-//! A simple, single threaded, test-only [`Engine`].
+//! A simple, single-threaded [`Engine`] for prefetched or in-memory data.
 //!
-//! All I/O goes through an [`ObjectStore`]. [`SyncEngine::new`] uses a [`LocalFileSystem`]
-//! built lazily per-URL (rooted at the URL's drive on Windows, or `/` on Unix), so any
-//! `file://` URL is supported. [`SyncEngine::new_with_store`] takes any other store
-//! (e.g. `InMemory`) and uses it directly for all URLs.
+//! All I/O goes through an [`ObjectStore`]. On native targets, [`SyncEngine::new`] uses a
+//! [`LocalFileSystem`] built lazily per URL. [`SyncEngine::new_with_store`] takes a supplied
+//! store (for example an `InMemory` cache) and is the only constructor available on
+//! `wasm32-unknown-unknown`.
 //!
-//! Async work is driven via [`futures::executor::block_on`], which is sufficient for stores
-//! that do not require a tokio reactor (`LocalFileSystem`, `InMemory`). Cloud-backed stores
-//! are NOT supported here -- they would deadlock because `block_on` parks the calling thread
-//! with no reactor to wake it. That's acceptable for this test-only engine; production code
-//! should use [`DefaultEngine`] instead.
+//! On native targets, async object-store calls are driven via [`futures::executor::block_on`].
+//! On `wasm32-unknown-unknown`, they are polled exactly once and must complete immediately.
+//! This prevents a pending future from parking the browser's only thread. Cloud-backed stores
+//! are therefore not supported here: browser callers must asynchronously prefetch data into
+//! an immediately-ready cache-backed store before invoking the kernel's synchronous handlers.
 //!
 //! [`DefaultEngine`]: crate::engine::default::DefaultEngine
 //! [`LocalFileSystem`]: crate::object_store::local::LocalFileSystem
 
+use std::future::Future;
 use std::sync::Arc;
 
 use bytes::Bytes;
+#[cfg(any(test, all(target_arch = "wasm32", target_os = "unknown")))]
+use futures::FutureExt as _;
 use itertools::Itertools;
 use tracing::debug;
 use url::Url;
 
 use super::arrow_expression::ArrowEvaluationHandler;
 use crate::engine::arrow_data::ArrowEngineData;
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use crate::object_store::local::LocalFileSystem;
 use crate::object_store::path::Path;
 use crate::object_store::DynObjectStore;
@@ -40,8 +44,8 @@ pub(crate) mod json;
 mod parquet;
 mod storage;
 
-/// A simple (test-only) implementation of [`Engine`]. See module docs for supported stores.
-pub(crate) struct SyncEngine {
+/// A single-threaded implementation of [`Engine`]. See the module docs for supported stores.
+pub struct SyncEngine {
     storage_handler: Arc<storage::SyncStorageHandler>,
     json_handler: Arc<json::SyncJsonHandler>,
     parquet_handler: Arc<parquet::SyncParquetHandler>,
@@ -50,14 +54,14 @@ pub(crate) struct SyncEngine {
 
 impl SyncEngine {
     /// Create a SyncEngine that reads from the local filesystem via [`LocalFileSystem`].
-    pub(crate) fn new() -> Self {
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    pub fn new() -> Self {
         Self::new_inner(None)
     }
 
-    /// Create a SyncEngine backed by `store`. All I/O is performed synchronously via
-    /// [`futures::executor::block_on`]. See module docs for the deadlock caveat on
-    /// reactor-dependent stores.
-    pub(crate) fn new_with_store(store: Arc<DynObjectStore>) -> Self {
+    /// Create a SyncEngine backed by `store`. See the module docs for the stricter
+    /// immediately-ready store contract on `wasm32-unknown-unknown`.
+    pub fn new_with_store(store: Arc<DynObjectStore>) -> Self {
         Self::new_inner(Some(store))
     }
 
@@ -114,44 +118,55 @@ pub(super) fn resolve_scope(
         let path = Path::from_url_path(url.path())?;
         return Ok((store.clone(), base_url, path));
     }
-    if url.scheme() != "file" {
+
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
         return Err(Error::generic(format!(
-            "SyncEngine without an explicit store can only access file:// URLs, got: {url}"
+            "SyncEngine on wasm32-unknown-unknown requires an explicit prefetched store for {url}"
         )));
     }
-    let file_path = url
-        .to_file_path()
-        .map_err(|()| Error::generic(format!("Invalid file URL: {url}")))?;
-    // Use the deepest existing ancestor of the URL's directory as the store prefix:
-    // `LocalFileSystem::new_with_prefix` canonicalizes its argument (which requires the path
-    // to exist), and operating on a non-existent path is a valid case for `list_from` on a
-    // not-yet-written `_delta_log/` directory or `head` on a missing file.
-    let target_dir = if url.path().ends_with('/') {
-        file_path.clone()
-    } else {
-        file_path
-            .parent()
-            .ok_or_else(|| Error::generic(format!("File URL has no parent: {url}")))?
-            .to_path_buf()
-    };
-    let mut prefix = target_dir.as_path();
-    while !prefix.exists() {
-        prefix = prefix
-            .parent()
-            .ok_or_else(|| Error::generic(format!("No existing ancestor for {target_dir:?}")))?;
+
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        if url.scheme() != "file" {
+            return Err(Error::generic(format!(
+                "SyncEngine without an explicit store can only access file:// URLs, got: {url}"
+            )));
+        }
+        let file_path = url
+            .to_file_path()
+            .map_err(|()| Error::generic(format!("Invalid file URL: {url}")))?;
+        // Use the deepest existing ancestor of the URL's directory as the store prefix:
+        // `LocalFileSystem::new_with_prefix` canonicalizes its argument (which requires the path
+        // to exist), and operating on a non-existent path is a valid case for `list_from` on a
+        // not-yet-written `_delta_log/` directory or `head` on a missing file.
+        let target_dir = if url.path().ends_with('/') {
+            file_path.clone()
+        } else {
+            file_path
+                .parent()
+                .ok_or_else(|| Error::generic(format!("File URL has no parent: {url}")))?
+                .to_path_buf()
+        };
+        let mut prefix = target_dir.as_path();
+        while !prefix.exists() {
+            prefix = prefix.parent().ok_or_else(|| {
+                Error::generic(format!("No existing ancestor for {target_dir:?}"))
+            })?;
+        }
+        let prefix = prefix.to_path_buf();
+        let relative = file_path
+            .strip_prefix(&prefix)
+            .map_err(|e| Error::generic(format!("Failed to strip prefix: {e}")))?;
+        let path = Path::from_iter(relative.components().filter_map(|c| match c {
+            std::path::Component::Normal(s) => s.to_str().map(String::from),
+            _ => None,
+        }));
+        let base_url = Url::from_directory_path(&prefix)
+            .map_err(|()| Error::generic(format!("Could not URL-encode prefix {prefix:?}")))?;
+        let store: Arc<DynObjectStore> = Arc::new(LocalFileSystem::new_with_prefix(&prefix)?);
+        Ok((store, base_url, path))
     }
-    let prefix = prefix.to_path_buf();
-    let relative = file_path
-        .strip_prefix(&prefix)
-        .map_err(|e| Error::generic(format!("Failed to strip prefix: {e}")))?;
-    let path = Path::from_iter(relative.components().filter_map(|c| match c {
-        std::path::Component::Normal(s) => s.to_str().map(String::from),
-        _ => None,
-    }));
-    let base_url = Url::from_directory_path(&prefix)
-        .map_err(|()| Error::generic(format!("Could not URL-encode prefix {prefix:?}")))?;
-    let store: Arc<DynObjectStore> = Arc::new(LocalFileSystem::new_with_prefix(&prefix)?);
-    Ok((store, base_url, path))
 }
 
 /// Fetch the contents of a file via [`resolve_scope`] and return them as bytes.
@@ -160,8 +175,11 @@ pub(super) fn get_bytes(
     location: &Url,
 ) -> DeltaResult<Bytes> {
     let (store, _, path) = resolve_scope(default_store, location)?;
-    let get_result = futures::executor::block_on(store.get(&path))?;
-    Ok(futures::executor::block_on(get_result.bytes())?)
+    let get_result = drive_sync(store.get(&path), "get prefetched object")??;
+    Ok(drive_sync(
+        get_result.bytes(),
+        "read prefetched object body",
+    )??)
 }
 
 /// Write `data` to `location` via [`resolve_scope`].
@@ -175,6 +193,7 @@ pub(super) fn put_bytes(
     data: Bytes,
     overwrite: bool,
 ) -> DeltaResult<()> {
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     if location.scheme() == "file" {
         if let Ok(file_path) = location.to_file_path() {
             if let Some(parent) = file_path.parent() {
@@ -193,15 +212,39 @@ pub(super) fn put_bytes(
             ..Default::default()
         }
     };
-    futures::executor::block_on(store.put_opts(&object_path, data.into(), opts)).map_err(|e| {
-        match e {
-            crate::object_store::Error::AlreadyExists { .. } => {
-                Error::FileAlreadyExists(location.to_string())
-            }
-            other => Error::generic(other.to_string()),
+    drive_sync(
+        store.put_opts(&object_path, data.into(), opts),
+        "write synchronous object",
+    )?
+    .map_err(|e| match e {
+        crate::object_store::Error::AlreadyExists { .. } => {
+            Error::FileAlreadyExists(location.to_string())
         }
+        other => Error::generic(other.to_string()),
     })?;
     Ok(())
+}
+
+#[cfg(any(test, all(target_arch = "wasm32", target_os = "unknown")))]
+fn poll_immediate<F: Future>(future: F, operation: &str) -> DeltaResult<F::Output> {
+    future.now_or_never().ok_or_else(|| {
+        Error::generic(format!(
+            "SyncEngine {operation} yielded Pending on wasm32-unknown-unknown; \
+             browser handlers require an asynchronously prefetched, immediately-ready store"
+        ))
+    })
+}
+
+fn drive_sync<F: Future>(future: F, operation: &str) -> DeltaResult<F::Output> {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        poll_immediate(future, operation)
+    }
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        let _ = operation;
+        Ok(futures::executor::block_on(future))
+    }
 }
 
 /// Read each file as bytes and feed it to `try_create_from_bytes` to produce data batches.
@@ -238,6 +281,19 @@ where
 mod tests {
     use super::*;
     use crate::engine::tests::test_arrow_engine;
+
+    #[test]
+    fn browser_immediate_driver_never_parks_the_host_thread() {
+        assert_eq!(
+            poll_immediate(futures::future::ready(42), "ready test").unwrap(),
+            42
+        );
+
+        let error = poll_immediate(futures::future::pending::<()>(), "pending test")
+            .expect_err("a pending prefetched-store future must fail instead of parking");
+        assert!(error.to_string().contains("pending test"));
+        assert!(error.to_string().contains("yielded Pending"));
+    }
 
     #[test]
     fn test_sync_engine() {

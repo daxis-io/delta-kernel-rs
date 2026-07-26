@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::num::NonZero;
 use std::sync::Arc;
 
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use rand::Rng;
 use url::Url;
 
@@ -288,11 +289,25 @@ impl WriteContext {
 /// Used to avoid S3 hotspots and to keep physical UUID column names out of paths when column
 /// mapping is enabled.
 fn random_alphanumeric_prefix(len: NonZero<usize>) -> String {
-    const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    let mut rng = rand::rng();
-    (0..len.get())
-        .map(|_| CHARSET[rng.random_range(0..CHARSET.len())] as char)
-        .collect()
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        return crate::utils::new_uuid()
+            .simple()
+            .to_string()
+            .chars()
+            .cycle()
+            .take(len.get())
+            .collect();
+    }
+
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        let mut rng = rand::rng();
+        (0..len.get())
+            .map(|_| CHARSET[rng.random_range(0..CHARSET.len())] as char)
+            .collect()
+    }
 }
 
 #[cfg(test)]

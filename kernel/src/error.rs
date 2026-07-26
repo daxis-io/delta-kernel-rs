@@ -5,9 +5,9 @@ use std::convert::Infallible;
 use std::num::ParseIntError;
 use std::str::Utf8Error;
 
-#[cfg(feature = "default-engine-base")]
+#[cfg(feature = "arrow-expression")]
 use crate::arrow::error::ArrowError;
-#[cfg(feature = "default-engine-base")]
+#[cfg(feature = "arrow-expression")]
 use crate::object_store;
 use crate::schema::{DataType, StructType};
 use crate::table_properties::ParseIntervalError;
@@ -31,7 +31,7 @@ pub enum Error {
     },
 
     /// An error performing operations on arrow data
-    #[cfg(feature = "default-engine-base")]
+    #[cfg(feature = "arrow-expression")]
     #[error(transparent)]
     Arrow(ArrowError),
 
@@ -66,19 +66,19 @@ pub enum Error {
     InternalError(String),
 
     /// An error enountered while working with parquet data
-    #[cfg(feature = "default-engine-base")]
+    #[cfg(feature = "arrow-expression")]
     #[error("Arrow error: {0}")]
     Parquet(#[from] crate::parquet::errors::ParquetError),
 
     /// An error interacting with the object_store crate
     // We don't use [#from] object_store::Error here as our From impl transforms
     // object_store::Error::NotFound into Self::FileNotFound
-    #[cfg(feature = "default-engine-base")]
+    #[cfg(feature = "arrow-expression")]
     #[error("Error interacting with object store: {0}")]
     ObjectStore(object_store::Error),
 
     /// An error working with paths from the object_store crate
-    #[cfg(feature = "default-engine-base")]
+    #[cfg(feature = "arrow-expression")]
     #[error("Object store path error: {0}")]
     ObjectStorePath(#[from] object_store::path::Error),
 
@@ -356,14 +356,14 @@ from_with_backtrace!(
     (std::io::Error, IOError)
 );
 
-#[cfg(feature = "default-engine-base")]
+#[cfg(feature = "arrow-expression")]
 impl From<ArrowError> for Error {
     fn from(value: ArrowError) -> Self {
         Self::Arrow(value).with_backtrace()
     }
 }
 
-#[cfg(feature = "default-engine-base")]
+#[cfg(feature = "arrow-expression")]
 impl From<object_store::Error> for Error {
     fn from(value: object_store::Error) -> Self {
         match value {

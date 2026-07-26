@@ -286,7 +286,7 @@ impl Metadata {
         }
 
         Ok(Self {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: crate::utils::new_uuid().to_string(),
             name,
             description,
             // As of Delta Lake 0.3.0, user-facing APIs only allow the creation of tables where
@@ -735,7 +735,7 @@ impl CommitInfo {
             kernel_version: Some(format!("v{KERNEL_VERSION}")),
             is_blind_append: is_blind_append.then_some(true),
             engine_info,
-            txn_id: Some(uuid::Uuid::new_v4().to_string()),
+            txn_id: Some(crate::utils::new_uuid().to_string()),
         }
     }
 }

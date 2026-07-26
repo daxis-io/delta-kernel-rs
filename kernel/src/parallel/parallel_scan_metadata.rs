@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::Instant;
 
 use delta_kernel_derive::internal_api;
 use tracing::{info_span, Span};
@@ -13,6 +12,7 @@ use crate::parallel::sequential_phase::{AfterSequential, SequentialPhase};
 use crate::scan::log_replay::{ScanLogReplayProcessor, SerializableScanState};
 use crate::scan::ScanMetadata;
 use crate::schema::SchemaRef;
+use crate::time::Instant;
 use crate::{DeltaResult, Engine, EngineData, Error, FileMeta};
 
 /// Result of sequential scan metadata processing.

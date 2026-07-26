@@ -1,12 +1,14 @@
 //! Various utility functions/macros used throughout the kernel
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use std::borrow::Cow;
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use std::ops::Deref;
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
 use delta_kernel_derive::internal_api;
 use url::Url;
 
+use crate::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::{DeltaResult, Error};
 
 /// convenient way to return an error if a condition isn't true
@@ -20,10 +22,34 @@ macro_rules! require {
 
 pub(crate) use require;
 
+/// Generate a process-local unique UUID without requiring ambient browser
+/// entropy.
+///
+/// Native builds retain random v4 UUIDs. The browser read profile uses a
+/// monotonically increasing, v4-shaped identifier for metrics and other
+/// in-process correlation. Browser writes are outside this profile.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub(crate) fn new_uuid() -> uuid::Uuid {
+    uuid::Uuid::new_v4()
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub(crate) fn new_uuid() -> uuid::Uuid {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_UUID: AtomicU64 = AtomicU64::new(1);
+    const VERSION_4_AND_VARIANT: u128 = 0x00000000_0000_4000_8000_000000000000;
+    const SEQUENCE_MASK: u64 = (1_u64 << 62) - 1;
+
+    let sequence = NEXT_UUID.fetch_add(1, Ordering::Relaxed) & SEQUENCE_MASK;
+    uuid::Uuid::from_u128(VERSION_4_AND_VARIANT | u128::from(sequence))
+}
+
 /// Try to parse string uri into a URL for a table path. This will do it's best to handle things
 /// like `/local/paths`, and even `../relative/paths`.
 #[allow(unused)]
 #[internal_api]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub(crate) fn try_parse_uri(uri: impl AsRef<str>) -> DeltaResult<Url> {
     let uri = uri.as_ref();
     let uri_type = resolve_uri_type(uri)?;
@@ -57,8 +83,32 @@ pub(crate) fn try_parse_uri(uri: impl AsRef<str>) -> DeltaResult<Url> {
     Ok(url)
 }
 
+/// Parse a browser table location without compiling filesystem URL helpers.
+///
+/// Browser engines receive an asynchronously prefetched object store, so local
+/// paths and `file:` URLs are outside the read-only browser profile.
+#[allow(unused)]
+#[internal_api]
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub(crate) fn try_parse_uri(uri: impl AsRef<str>) -> DeltaResult<Url> {
+    let uri = uri.as_ref();
+    let normalized = if uri.ends_with('/') {
+        uri.to_owned()
+    } else {
+        format!("{uri}/")
+    };
+    let url = Url::parse(&normalized).map_err(|_| Error::invalid_table_location(uri))?;
+    if url.scheme() == "file" || url.scheme().len() == 1 {
+        return Err(Error::InvalidTableLocation(format!(
+            "Browser table locations must use a non-file absolute URL: {uri}"
+        )));
+    }
+    Ok(url)
+}
+
 #[allow(unused)]
 #[derive(Debug)]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 enum UriType {
     LocalPath(PathBuf),
     Url(Url),
@@ -69,6 +119,7 @@ enum UriType {
 ///
 /// Will return an error if the path is not valid.
 #[allow(unused)]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 fn resolve_uri_type(table_uri: impl AsRef<str>) -> DeltaResult<UriType> {
     let table_uri = table_uri.as_ref();
     let table_uri = if table_uri.ends_with('/') {

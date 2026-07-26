@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use uuid::Uuid;
 
+use crate::utils::new_uuid;
+
 /// Unique identifier for a metrics operation.
 ///
 /// Each operation (Snapshot, Transaction, Scan) gets a unique MetricId that
@@ -37,7 +39,7 @@ impl std::fmt::Display for ScanType {
 impl MetricId {
     /// Generate a new unique MetricId.
     pub fn new() -> Self {
-        Self(Uuid::new_v4())
+        Self(new_uuid())
     }
 }
 

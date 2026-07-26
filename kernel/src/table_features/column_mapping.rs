@@ -7,7 +7,6 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use strum::EnumString;
-use uuid::Uuid;
 
 use super::TableFeature;
 use crate::actions::Protocol;
@@ -17,6 +16,7 @@ use crate::schema::{
 };
 use crate::table_properties::{TableProperties, COLUMN_MAPPING_MODE};
 use crate::transforms::{transform_output_type, SchemaTransform};
+use crate::utils::new_uuid;
 use crate::{DeltaResult, Error};
 
 /// Modes of column mapping a table can be in
@@ -562,7 +562,7 @@ pub(crate) fn try_assign_flat_column_mapping_info(
                 ColumnMetadataKey::ColumnMappingPhysicalName
                     .as_ref()
                     .to_string(),
-                MetadataValue::String(format!("col-{}", Uuid::new_v4())),
+                MetadataValue::String(format!("col-{}", new_uuid())),
             );
         }
         // Only `physicalName` present: preserve name, allocate id.
@@ -584,7 +584,7 @@ pub(crate) fn try_assign_flat_column_mapping_info(
                 ColumnMetadataKey::ColumnMappingPhysicalName
                     .as_ref()
                     .to_string(),
-                MetadataValue::String(format!("col-{}", Uuid::new_v4())),
+                MetadataValue::String(format!("col-{}", new_uuid())),
             );
         }
     }
