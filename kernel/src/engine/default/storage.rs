@@ -110,7 +110,10 @@ where
     Ok(Arc::new(store))
 }
 
-#[cfg(any(not(feature = "arrow-57"), feature = "arrow-58"))]
+#[cfg(all(
+    any(not(feature = "arrow-57"), feature = "arrow-58"),
+    not(feature = "daxis-browser-stack")
+))]
 #[cfg(test)]
 mod tests {
     use hdfs_native_object_store::HdfsObjectStoreBuilder;

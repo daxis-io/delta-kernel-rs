@@ -28,7 +28,10 @@ use super::arrow_expression::ArrowEvaluationHandler;
 use crate::engine::arrow_data::ArrowEngineData;
 #[cfg(all(
     not(all(target_arch = "wasm32", target_os = "unknown")),
-    any(not(feature = "daxis-browser-stack"), feature = "default-engine-base")
+    any(
+        not(feature = "daxis-browser-stack"),
+        feature = "daxis-native-default-engine"
+    )
 ))]
 use crate::object_store::local::LocalFileSystem;
 use crate::object_store::path::Path;
@@ -59,7 +62,10 @@ impl SyncEngine {
     /// Create a SyncEngine that reads from the local filesystem via [`LocalFileSystem`].
     #[cfg(all(
         not(all(target_arch = "wasm32", target_os = "unknown")),
-        any(not(feature = "daxis-browser-stack"), feature = "default-engine-base")
+        any(
+            not(feature = "daxis-browser-stack"),
+            feature = "daxis-native-default-engine"
+        )
     ))]
     pub fn new() -> Self {
         Self::new_inner(None)
@@ -130,7 +136,7 @@ pub(super) fn resolve_scope(
         all(
             not(all(target_arch = "wasm32", target_os = "unknown")),
             feature = "daxis-browser-stack",
-            not(feature = "default-engine-base")
+            not(feature = "daxis-native-default-engine")
         )
     ))]
     {
@@ -141,7 +147,10 @@ pub(super) fn resolve_scope(
 
     #[cfg(all(
         not(all(target_arch = "wasm32", target_os = "unknown")),
-        any(not(feature = "daxis-browser-stack"), feature = "default-engine-base")
+        any(
+            not(feature = "daxis-browser-stack"),
+            feature = "daxis-native-default-engine"
+        )
     ))]
     {
         if url.scheme() != "file" {

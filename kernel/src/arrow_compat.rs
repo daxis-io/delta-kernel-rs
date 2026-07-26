@@ -4,13 +4,12 @@
 mod arrow_compat_shims {
     #[cfg(all(
         not(all(target_arch = "wasm32", target_os = "unknown")),
-        any(not(feature = "daxis-browser-stack"), feature = "default-engine-base")
+        not(feature = "daxis-browser-stack")
     ))]
     pub use arrow_58_native as arrow;
     #[cfg(all(
         not(all(target_arch = "wasm32", target_os = "unknown")),
-        feature = "daxis-browser-stack",
-        not(feature = "default-engine-base")
+        feature = "daxis-browser-stack"
     ))]
     pub use arrow_58_stack as arrow;
     #[cfg(all(
@@ -21,13 +20,12 @@ mod arrow_compat_shims {
     pub use arrow_58_stack as arrow;
     #[cfg(all(
         not(all(target_arch = "wasm32", target_os = "unknown")),
-        any(not(feature = "daxis-browser-stack"), feature = "default-engine-base")
+        not(feature = "daxis-browser-stack")
     ))]
     pub use parquet_58_native as parquet;
     #[cfg(all(
         not(all(target_arch = "wasm32", target_os = "unknown")),
-        feature = "daxis-browser-stack",
-        not(feature = "default-engine-base")
+        feature = "daxis-browser-stack"
     ))]
     pub use parquet_58_stack as parquet;
     #[cfg(all(
@@ -40,13 +38,12 @@ mod arrow_compat_shims {
     pub mod object_store {
         #[cfg(all(
             not(all(target_arch = "wasm32", target_os = "unknown")),
-            any(not(feature = "daxis-browser-stack"), feature = "default-engine-base")
+            not(feature = "daxis-browser-stack")
         ))]
         pub use object_store_13_native::*;
         #[cfg(all(
             not(all(target_arch = "wasm32", target_os = "unknown")),
-            feature = "daxis-browser-stack",
-            not(feature = "default-engine-base")
+            feature = "daxis-browser-stack"
         ))]
         pub use object_store_13_stack::*;
         #[cfg(all(

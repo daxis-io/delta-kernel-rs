@@ -139,6 +139,14 @@ daxis-browser-stack = [
   "dep:parquet_58_stack",
   "dep:object_store_13_stack",
 ]
+daxis-native-default-engine = [
+  "daxis-browser-stack",
+  "object_store_13_stack/aws",
+  "object_store_13_stack/azure",
+  "object_store_13_stack/fs",
+  "object_store_13_stack/gcp",
+  "object_store_13_stack/http",
+]
 arrow-conversion = ["need-arrow"]
 arrow-expression = ["need-arrow"]
 
