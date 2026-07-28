@@ -67,9 +67,9 @@ tokio = { version = "1.47", optional = true, features = ["rt-multi-thread"] }
 # both arrow versions below are optional and require object_store
 object_store_12 = { package = "object_store", version = "0.12.3", optional = true, features = ["aws", "azure", "gcp", "http"] }
 # Daxis-only stack dependencies are activated explicitly by `daxis-browser-stack`.
-object_store_13_stack = { package = "object_store", git = "https://github.com/daxis-io/arrow-rs-object-store", rev = "a04240eafdc5833e34fe21d4b348ee399177def6", default-features = false, optional = true }
-arrow_58_stack = { package = "arrow", git = "https://github.com/daxis-io/arrow-rs", rev = "518663f4fb39ec0be672718432bbd7bb8a5456fc", default-features = false, features = ["chrono-tz", "ffi", "json"], optional = true }
-parquet_58_stack = { package = "parquet", git = "https://github.com/daxis-io/arrow-rs", rev = "518663f4fb39ec0be672718432bbd7bb8a5456fc", default-features = false, features = ["arrow", "async", "base64", "brotli", "flate2-zlib-rs", "lz4", "object_store", "simdutf8", "snap", "zstd"], optional = true }
+object_store_13_stack = { package = "object_store", git = "https://github.com/daxis-io/arrow-rs-object-store", rev = "ab9fda65805487edf5487e63082cab8111f0a178", default-features = false, optional = true }
+arrow_58_stack = { package = "arrow", git = "https://github.com/daxis-io/arrow-rs", rev = "52c8fb2e9c28b9d89d08c313e1bc938a35c29c99", default-features = false, features = ["chrono-tz", "ffi", "json"], optional = true }
+parquet_58_stack = { package = "parquet", git = "https://github.com/daxis-io/arrow-rs", rev = "52c8fb2e9c28b9d89d08c313e1bc938a35c29c99", default-features = false, features = ["arrow", "async", "base64", "brotli", "flate2-zlib-rs", "lz4", "object_store", "simdutf8", "snap", "zstd"], optional = true }
 
 [target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
 rand = "0.9"
