@@ -10,15 +10,15 @@ use crate::arrow::array::types::{
     Int64Type, Int8Type, TimestampMicrosecondType,
 };
 use crate::arrow::array::{
-    Array, ArrayRef, GenericByteArray, OffsetSizeTrait, RecordBatch, RunArray, StringViewArray,
-    StructArray,
+    make_array, Array, ArrayRef, GenericByteArray, OffsetSizeTrait, RecordBatch, RunArray,
+    StringViewArray, StructArray,
 };
+use crate::arrow::buffer::NullBuffer;
 use crate::arrow::compute::filter_record_batch;
 use crate::arrow::datatypes::{
     DataType as ArrowDataType, Field as ArrowField, FieldRef, Schema as ArrowSchema,
 };
 use crate::engine::arrow_conversion::TryIntoArrow as _;
-pub use crate::engine::arrow_utils::fix_nested_null_masks;
 use crate::engine_data::{EngineData, GetData, RowVisitor, StringArrayAccessor};
 use crate::expressions::ArrayData;
 use crate::schema::{ColumnName, DataType, PrimitiveType, SchemaRef};
@@ -62,6 +62,7 @@ impl EngineDataArrowExt for DeltaResult<Box<dyn EngineData>> {
 }
 
 /// Helper function to extract a RecordBatch from EngineData, ensuring it's ArrowEngineData
+#[cfg(any(feature = "arrow-expression", test))]
 pub(crate) fn extract_record_batch(engine_data: &dyn EngineData) -> DeltaResult<&RecordBatch> {
     let Some(arrow_data) = engine_data.any_ref().downcast_ref::<ArrowEngineData>() else {
         return Err(Error::engine_data_type("ArrowEngineData"));
@@ -76,6 +77,59 @@ pub(crate) fn unshredded_variant_arrow_type() -> ArrowDataType {
     let value_field = ArrowField::new("value", ArrowDataType::Binary, false);
     let fields = vec![metadata_field, value_field];
     ArrowDataType::Struct(fields.into())
+}
+
+/// Use this function to recursively compute properly unioned null masks for all nested
+/// columns of a record batch, making it safe to project out and consume nested columns.
+///
+/// Arrow does not guarantee that the null masks associated with nested columns are accurate --
+/// instead, the reader must consult the union of logical null masks the column and all
+/// ancestors. The parquet reader stopped doing this automatically as of arrow-53.3, for example.
+pub fn fix_nested_null_masks(batch: StructArray) -> StructArray {
+    compute_nested_null_masks(batch, None)
+}
+
+/// Splits a StructArray into its parts, unions in the parent null mask, and uses the result to
+/// recursively update the children as well before putting everything back together.
+fn compute_nested_null_masks(sa: StructArray, parent_nulls: Option<&NullBuffer>) -> StructArray {
+    let (fields, columns, nulls) = sa.into_parts();
+    let nulls = NullBuffer::union(parent_nulls, nulls.as_ref());
+    let columns = columns
+        .into_iter()
+        .map(|column| match column.data_type() {
+            // NullArray (void columns) does not accept a null buffer — all values are
+            // already null by definition, so propagating the parent null mask is a no-op.
+            ArrowDataType::Null => column,
+            ArrowDataType::Struct(_) => {
+                let sa = column.as_struct();
+                Arc::new(compute_nested_null_masks(sa.clone(), nulls.as_ref())) as _
+            }
+            _ => {
+                let data = column.to_data();
+                let nulls = NullBuffer::union(nulls.as_ref(), data.nulls());
+                let builder = data.into_builder().nulls(nulls);
+                // Use an unchecked build to avoid paying a redundant O(k) validation cost for a
+                // `RecordBatch` with k leaf columns.
+                //
+                // SAFETY: The builder was constructed from an `ArrayData` we extracted from the
+                // column. The change we make is the null buffer, via `NullBuffer::union` with input
+                // null buffers that were _also_ extracted from the column and its parent. A union
+                // can only _grow_ the set of NULL rows, so data validity is preserved. Even if the
+                // `parent_nulls` somehow had a length mismatch --- which it never should, having
+                // also been extracted from our grandparent --- the mismatch would have already
+                // caused `NullBuffer::union` to panic.
+                let data = unsafe { builder.build_unchecked() };
+                make_array(data)
+            }
+        })
+        .collect();
+
+    // Use an unchecked constructor to avoid paying O(n*k) a redundant null buffer validation cost
+    // for a `RecordBatch` with n rows and k leaf columns.
+    //
+    // SAFETY: We are simply reassembling the input `StructArray` we previously broke apart, with
+    // updated null buffers. See above for details about null buffer safety.
+    unsafe { StructArray::new_unchecked(fields, columns, nulls) }
 }
 
 impl ArrowEngineData {

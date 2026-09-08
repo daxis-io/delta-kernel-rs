@@ -56,14 +56,13 @@ prost = { version = "0.13", optional = true }
 tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = "0.3"
 url = { version = "2", features = ["serde"] }
-uuid = { version = "1.18.0", features = ["v4", "fast-rng"] }
 z85 = "3.0.6"
 
 # optional deps
 # `reqwest` is only needed for the gated `Error::Reqwest` variant; the actual HTTP client
 # lives in the `delta_kernel_default_engine` crate now.
 reqwest = { version = "0.13", default-features = false, optional = true }
-# both arrow versions below are optional and require object_store
+# Native Parquet support uses the compatibility object_store version.
 object_store_13 = { package = "object_store", version = "0.13.2", optional = true, features = ["aws", "azure", "gcp", "http"] }
 
 # arrow 58
@@ -90,6 +89,14 @@ version = "59"
 features = ["async", "object_store"]
 optional = true
 
+[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
+uuid = { version = "1.18.0", features = ["v4", "fast-rng"] }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+uuid = { version = "1.18.0", features = ["v4", "js"] }
+# Kernel's rand 0.9 uses getrandom 0.3 independently of UUID's browser backend.
+getrandom = { version = "0.3.4", features = ["wasm_js"] }
+
 [features]
 # no default features
 default = []
@@ -106,16 +113,23 @@ integration-test = ["hdfs-native-object-store/integration-test"]
 arrow = ["arrow-59"] # latest arrow version
 need-arrow = [] # need-arrow is a marker that the feature needs arrow dep
 
+arrow-only = ["dep:arrow_59"]
 arrow-58 = ["dep:arrow_58", "dep:parquet_58", "dep:object_store_13"]
-arrow-59 = ["dep:arrow_59", "dep:parquet_59", "dep:object_store_13"]
+arrow-59 = ["arrow-only", "dep:parquet_59", "dep:object_store_13"]
 arrow-conversion = ["need-arrow"]
-arrow-expression = ["need-arrow"]
+arrow-engine-data = ["arrow-conversion"]
+arrow-expression = ["arrow-engine-data"]
 
 # Schema diffing functionality (experimental)
 schema-diff = []
 
 # Declarative plan IR (experimental).
 declarative-plans = ["internal-api", "dep:prost", "dep:prost-build"]
+
+# Owned operation orchestration is independent of Arrow and storage implementations.
+operation-tasks = ["declarative-plans"]
+# Browser capabilities are additive and remain valid on native targets.
+browser-wasm = ["operation-tasks", "arrow-only", "arrow-expression"]
 
 # Sources a prebuilt `protoc` for the codegen `declarative-plans` runs, so the build needs no
 # system protobuf install. Leave it off to pass `protoc` through the `PROTOC` env var instead;
@@ -137,7 +151,7 @@ geo-type-in-dev = []
 # ensure_data_types, parquet_row_group_skipping). Used by the delta_kernel_default_engine crate
 # and the SyncEngine. Keeps `reqwest` only for the gated `Error::Reqwest` variant.
 default-engine-base = [
-  "arrow-conversion",
+  "arrow-engine-data",
   "arrow-expression",
   "need-arrow",
   "reqwest",

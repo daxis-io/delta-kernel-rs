@@ -3,45 +3,57 @@
 pub(crate) mod apply_schema;
 
 use std::borrow::Cow;
+#[cfg(any(feature = "arrow-58", feature = "arrow-59"))]
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
-use std::sync::{Arc, LazyLock, OnceLock};
+#[cfg(any(feature = "arrow-58", feature = "arrow-59"))]
+use std::sync::OnceLock;
+use std::sync::{Arc, LazyLock};
 
 use delta_kernel_derive::internal_api;
+#[cfg(any(feature = "arrow-58", feature = "arrow-59"))]
 use itertools::Itertools;
 use tracing::debug;
 
 use self::apply_schema::apply_schema_to_struct;
 use crate::arrow::array::cast::AsArray;
 use crate::arrow::array::{
-    make_array, new_null_array, Array as ArrowArray, ArrayRef as ArrowArrayRef, GenericListArray,
-    MapArray, OffsetSizeTrait, PrimitiveArray, RecordBatch, RecordBatchOptions, StringArray,
-    StructArray,
+    new_null_array, Array as ArrowArray, ArrayRef as ArrowArrayRef, GenericListArray, MapArray,
+    OffsetSizeTrait, PrimitiveArray, RecordBatch, RecordBatchOptions, StringArray, StructArray,
 };
-use crate::arrow::buffer::NullBuffer;
 use crate::arrow::compute::{cast_with_options, CastOptions};
+#[cfg(any(feature = "arrow-58", feature = "arrow-59"))]
+use crate::arrow::datatypes::Fields as ArrowFields;
 use crate::arrow::datatypes::{
-    DataType as ArrowDataType, Field as ArrowField, FieldRef as ArrowFieldRef,
-    Fields as ArrowFields, Int64Type, Schema as ArrowSchema, SchemaRef as ArrowSchemaRef,
+    DataType as ArrowDataType, Field as ArrowField, FieldRef as ArrowFieldRef, Int64Type,
+    Schema as ArrowSchema, SchemaRef as ArrowSchemaRef,
 };
 use crate::arrow::json::writer::{make_encoder, LineDelimited, NullableEncoder};
 use crate::arrow::json::{Encoder, EncoderFactory, EncoderOptions, ReaderBuilder, WriterBuilder};
+#[cfg(any(feature = "arrow-58", feature = "arrow-59"))]
+use crate::engine::arrow_conversion::PARQUET_FIELD_ID_META_KEY;
 use crate::engine::arrow_conversion::{TryFromKernel as _, TryIntoArrow as _};
+pub use crate::engine::arrow_data::fix_nested_null_masks;
 use crate::engine::arrow_data::ArrowEngineData;
+#[cfg(any(feature = "arrow-58", feature = "arrow-59"))]
 use crate::engine::ensure_data_types::DataTypeCompat;
 use crate::engine_data::FilteredEngineData;
+#[cfg(any(feature = "arrow-58", feature = "arrow-59"))]
 use crate::parquet::arrow::arrow_reader::ArrowReaderMetadata;
-use crate::parquet::arrow::{ProjectionMask, PARQUET_FIELD_ID_META_KEY};
+#[cfg(any(feature = "arrow-58", feature = "arrow-59"))]
+use crate::parquet::arrow::ProjectionMask;
+#[cfg(any(feature = "arrow-58", feature = "arrow-59"))]
 use crate::parquet::file::metadata::RowGroupMetaData;
+#[cfg(any(feature = "arrow-58", feature = "arrow-59"))]
 use crate::parquet::schema::types::SchemaDescriptor;
-use crate::schema::{
-    schema, ArrayType, ColumnMetadataKey, DataType, MapType, MetadataColumnSpec, MetadataValue,
-    PrimitiveType, Schema, SchemaRef, StructField, StructType,
-};
+#[cfg(any(feature = "arrow-58", feature = "arrow-59"))]
+use crate::schema::{schema, ColumnMetadataKey, DataType, MetadataValue, Schema, StructField};
+use crate::schema::{ArrayType, MapType, MetadataColumnSpec, PrimitiveType, SchemaRef, StructType};
 use crate::transforms::{transform_output_type, SchemaTransform};
 use crate::utils::require;
 use crate::{DeltaResult, EngineData, Error};
 
+#[cfg(feature = "arrow-expression")]
 macro_rules! prim_array_cmp {
     ( $left_arr: ident, $right_arr: ident, $(($data_ty: pat, $prim_ty: ty)),+ ) => {
 
@@ -69,8 +81,10 @@ macro_rules! prim_array_cmp {
     };
 }
 
+#[cfg(feature = "arrow-expression")]
 pub(crate) use prim_array_cmp;
 
+#[cfg(any(feature = "arrow-58", feature = "arrow-59"))]
 type FieldIndex = usize;
 type FlattenedRangeIterator<T> = std::iter::Flatten<std::vec::IntoIter<Range<T>>>;
 
@@ -78,6 +92,7 @@ type FlattenedRangeIterator<T> = std::iter::Flatten<std::vec::IntoIter<Range<T>>
 ///
 /// # Lifetime Parameters
 /// * `'k` - The lifetime of the referenced kernel StructField
+#[cfg(any(feature = "arrow-58", feature = "arrow-59"))]
 struct KernelFieldInfo<'k> {
     /// The index of the struct field in its parent struct
     parquet_index: FieldIndex,
@@ -91,6 +106,7 @@ struct KernelFieldInfo<'k> {
 /// # Lifetime Parameters
 /// * `'k` - The lifetime of the referenced kernel StructField
 /// * `'p` - The lifetime of the referenced parquet ArrowField
+#[cfg(any(feature = "arrow-58", feature = "arrow-59"))]
 struct MatchedParquetField<'p, 'k> {
     /// The index of the parquet field
     parquet_index: FieldIndex,
@@ -111,11 +127,13 @@ pub(crate) fn make_arrow_error(s: impl Into<String>) -> Error {
 
 /// Prepares to enumerate row indexes of rows in a parquet file, accounting for row group skipping.
 #[internal_api]
+#[cfg(any(feature = "arrow-58", feature = "arrow-59"))]
 pub(crate) struct RowIndexBuilder {
     row_group_row_index_ranges: Vec<Range<i64>>,
     row_group_ordinals: Option<Vec<usize>>,
 }
 
+#[cfg(any(feature = "arrow-58", feature = "arrow-59"))]
 impl RowIndexBuilder {
     #[internal_api]
     pub(crate) fn new(row_groups: &[RowGroupMetaData]) -> Self {
@@ -354,10 +372,12 @@ impl ReorderIndex {
         ReorderIndex { index, transform }
     }
 
+    #[cfg(any(feature = "arrow-58", feature = "arrow-59"))]
     fn cast(index: usize, target: ArrowDataType) -> Self {
         ReorderIndex::new(index, ReorderIndexTransform::Cast(target))
     }
 
+    #[cfg(any(feature = "arrow-58", feature = "arrow-59"))]
     fn nested(index: usize, children: Vec<ReorderIndex>) -> Self {
         ReorderIndex::new(index, ReorderIndexTransform::Nested(children))
     }
@@ -370,6 +390,7 @@ impl ReorderIndex {
         ReorderIndex::new(index, ReorderIndexTransform::Missing(field))
     }
 
+    #[cfg(any(feature = "arrow-58", feature = "arrow-59"))]
     fn row_index(index: usize, field: ArrowFieldRef) -> Self {
         ReorderIndex::new(index, ReorderIndexTransform::RowIndex(field))
     }
@@ -397,10 +418,12 @@ impl ReorderIndex {
 }
 
 // count the number of physical columns, including nested ones in an `ArrowField`
+#[cfg(any(feature = "arrow-58", feature = "arrow-59"))]
 fn count_cols(field: &ArrowField) -> usize {
     _count_cols(field.data_type())
 }
 
+#[cfg(any(feature = "arrow-58", feature = "arrow-59"))]
 fn _count_cols(dt: &ArrowDataType) -> usize {
     match dt {
         ArrowDataType::Struct(fields) => fields.iter().map(|f| count_cols(f)).sum(),
@@ -418,6 +441,7 @@ fn _count_cols(dt: &ArrowDataType) -> usize {
 /// `VARIANT` type is represented as `STRUCT<metadata: BINARY, value: BINARY>`. This is to make
 /// sure that the default engine does not try to read shredded Variants, which it currently does
 /// not support.
+#[cfg(any(feature = "arrow-58", feature = "arrow-59"))]
 fn validate_parquet_variant(field: &ArrowField) -> DeltaResult<()> {
     fn variant_parquet_error(field_name: &String) -> Error {
         Error::Generic(format!(
@@ -447,6 +471,7 @@ fn validate_parquet_variant(field: &ArrowField) -> DeltaResult<()> {
 /// structs, lists, and maps. `parquet_offset` is how many parquet fields exist before processing
 /// this potentially nested schema. returns the number of parquet fields in `fields` (regardless of
 /// if they are selected or not) and reordering information for the requested fields.
+#[cfg(any(feature = "arrow-58", feature = "arrow-59"))]
 fn get_indices(
     start_parquet_offset: usize,
     requested_schema: &Schema,
@@ -721,6 +746,7 @@ fn get_indices(
 /// with a a kernel `KernelFieldInfo` representing a StructField.
 ///
 /// The iterator returned has a [`MatchedParquetField`] for each element in `parquet_fields`.
+#[cfg(any(feature = "arrow-58", feature = "arrow-59"))]
 fn match_parquet_fields<'k, 'p>(
     kernel_schema: &'k StructType,
     parquet_fields: &'p ArrowFields,
@@ -791,6 +817,7 @@ fn match_parquet_fields<'k, 'p>(
 /// Uses [`ArrowReaderMetadata::schema`] for logical column matching and
 /// [`ArrowReaderMetadata::parquet_schema`] for the physical [`ProjectionMask`].
 #[internal_api]
+#[cfg(any(feature = "arrow-58", feature = "arrow-59"))]
 pub(crate) fn parquet_read_plan(
     requested_schema: &SchemaRef,
     file_metadata: &ArrowReaderMetadata,
@@ -800,6 +827,7 @@ pub(crate) fn parquet_read_plan(
     Ok((reorder, mask))
 }
 
+#[cfg(any(feature = "arrow-58", feature = "arrow-59"))]
 fn get_requested_indices(
     requested_schema: &SchemaRef,
     file_arrow_schema: &ArrowSchemaRef,
@@ -814,6 +842,7 @@ fn get_requested_indices(
     Ok((mask_indices, reorder_indexes))
 }
 
+#[cfg(any(feature = "arrow-58", feature = "arrow-59"))]
 fn generate_mask(
     file_parquet_schema: &SchemaDescriptor,
     indices: &[usize],
@@ -1097,59 +1126,6 @@ fn reorder_map(
         ordered,
     )?);
     Ok(Some((new_field, map)))
-}
-
-/// Use this function to recursively compute properly unioned null masks for all nested
-/// columns of a record batch, making it safe to project out and consume nested columns.
-///
-/// Arrow does not guarantee that the null masks associated with nested columns are accurate --
-/// instead, the reader must consult the union of logical null masks the column and all
-/// ancestors. The parquet reader stopped doing this automatically as of arrow-53.3, for example.
-pub fn fix_nested_null_masks(batch: StructArray) -> StructArray {
-    compute_nested_null_masks(batch, None)
-}
-
-/// Splits a StructArray into its parts, unions in the parent null mask, and uses the result to
-/// recursively update the children as well before putting everything back together.
-fn compute_nested_null_masks(sa: StructArray, parent_nulls: Option<&NullBuffer>) -> StructArray {
-    let (fields, columns, nulls) = sa.into_parts();
-    let nulls = NullBuffer::union(parent_nulls, nulls.as_ref());
-    let columns = columns
-        .into_iter()
-        .map(|column| match column.data_type() {
-            // NullArray (void columns) does not accept a null buffer — all values are
-            // already null by definition, so propagating the parent null mask is a no-op.
-            ArrowDataType::Null => column,
-            ArrowDataType::Struct(_) => {
-                let sa = column.as_struct();
-                Arc::new(compute_nested_null_masks(sa.clone(), nulls.as_ref())) as _
-            }
-            _ => {
-                let data = column.to_data();
-                let nulls = NullBuffer::union(nulls.as_ref(), data.nulls());
-                let builder = data.into_builder().nulls(nulls);
-                // Use an unchecked build to avoid paying a redundant O(k) validation cost for a
-                // `RecordBatch` with k leaf columns.
-                //
-                // SAFETY: The builder was constructed from an `ArrayData` we extracted from the
-                // column. The change we make is the null buffer, via `NullBuffer::union` with input
-                // null buffers that were _also_ extracted from the column and its parent. A union
-                // can only _grow_ the set of NULL rows, so data validity is preserved. Even if the
-                // `parent_nulls` somehow had a length mismatch --- which it never should, having
-                // also been extracted from our grandparent --- the mismatch would have already
-                // caused `NullBuffer::union` to panic.
-                let data = unsafe { builder.build_unchecked() };
-                make_array(data)
-            }
-        })
-        .collect();
-
-    // Use an unchecked constructor to avoid paying O(n*k) a redundant null buffer validation cost
-    // for a `RecordBatch` with n rows and k leaf columns.
-    //
-    // SAFETY: We are simply reassembling the input `StructArray` we previously broke apart, with
-    // updated null buffers. See above for details about null buffer safety.
-    unsafe { StructArray::new_unchecked(fields, columns, nulls) }
 }
 
 /// Parse a column of JSON strings into a typed `RecordBatch` matching `schema`. N input
@@ -1575,7 +1551,7 @@ mod tests {
         NullArray, OffsetSizeTrait, StringArray, StringBuilder, StringViewArray, StructArray,
         StructBuilder,
     };
-    use crate::arrow::buffer::{OffsetBuffer, ScalarBuffer};
+    use crate::arrow::buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
     use crate::arrow::datatypes::{
         DataType as ArrowDataType, Field as ArrowField, Fields as ArrowFields, Int32Type,
         Schema as ArrowSchema, SchemaRef as ArrowSchemaRef,

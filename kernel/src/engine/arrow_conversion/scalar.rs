@@ -1,4 +1,4 @@
-//! Extract a kernel [`Scalar`] from a single row of an Arrow array.
+//! Convert kernel scalars to Arrow arrays and extract primitive scalars from Arrow.
 //!
 //! # Supported types
 //!
@@ -6,23 +6,248 @@
 //! Boolean, String, Date, Timestamp, TimestampNtz, Decimal, Binary (including `LargeUtf8`
 //! and `LargeBinary` Arrow variants).
 //!
-//! Complex types (Struct, Array, Map) are not supported and return an error.
+//! Primitive extraction rejects complex types (Struct, Array, Map). Arrow construction also
+//! supports these complex types.
 //!
 //! [`Scalar`]: crate::expressions::Scalar
 
 // TODO: add `extract_scalar` that handles complex types (Struct, Array, Map) via recursive
 // extraction into StructData/ArrayData/MapData when there is a concrete use case.
 
+use super::TryFromKernel as _;
 use crate::arrow::array::cast::AsArray;
 use crate::arrow::array::types::{
     Date32Type, Decimal128Type, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type,
     Int8Type, TimestampMicrosecondType,
 };
-use crate::arrow::array::Array;
+use crate::arrow::array::{self, Array, ArrayBuilder, ArrayRef};
 use crate::arrow::datatypes::{DataType as ArrowDataType, TimeUnit};
-use crate::expressions::Scalar;
-use crate::schema::DataType;
+use crate::expressions::{ArrayData, Scalar};
+use crate::schema::{DataType, PrimitiveType};
+use crate::utils::require;
 use crate::{DeltaResult, Error};
+
+// TODO leverage scalars / Datum
+
+impl Scalar {
+    /// Convert scalar to arrow array.
+    pub fn to_array(&self, num_rows: usize) -> DeltaResult<ArrayRef> {
+        let data_type = ArrowDataType::try_from_kernel(&self.data_type())?;
+        let mut builder = array::make_builder(&data_type, num_rows);
+        self.append_to(&mut builder, num_rows)?;
+        Ok(builder.finish())
+    }
+
+    // Arrow uses composable "builders" to assemble arrays one row at a time. Each concrete `Array`
+    // type has a corresponding concrete `ArrayBuilder` type. For primitive types, the builder just
+    // needs to `append` one value per row. For complex types, the builder needs to recursively
+    // append values to each of its children as needed, and then its own `append` only defines the
+    // validity for the row. Unfortunately, there is no generic way to append values to builders;
+    // the `ArrayBuilder` trait only knows how to `finalize` itself to produce an `ArrayRef`. So we
+    // have to cast each builder to the appropriate type, based on the scalar's data type. For
+    // details, refer to the arrow documentation:
+    //
+    // https://docs.rs/arrow/latest/arrow/array/struct.PrimitiveBuilder.html
+    // https://docs.rs/arrow/latest/arrow/array/struct.GenericListBuilder.html
+    // https://docs.rs/arrow/latest/arrow/array/struct.StructBuilder.html
+    //
+    // NOTE: `ListBuilder` and `MapBuilder` are take generic element/key/value builders in order to
+    // work with specific builder types directly. However, `array::make_builder` instantiates them
+    // with `Box<dyn Builder>` instead, which greatly simplifies our job in working with them. We
+    // can just extract the builder trait, and let recursive calls cast it to the desired type.
+    //
+    // WARNING: List and map builders do _NOT_ require appending any child entries to NULL list/map
+    // rows, because empty list/map is a valid state. But struct builders _DO_ require appending
+    // (possibly NULL) entries in order to preserve consistent row counts between the struct and its
+    // fields.
+    pub(crate) fn append_to(
+        &self,
+        builder: &mut dyn ArrayBuilder,
+        num_rows: usize,
+    ) -> DeltaResult<()> {
+        use Scalar::*;
+        macro_rules! builder_as {
+            ($t:ty) => {{
+                builder.as_any_mut().downcast_mut::<$t>().ok_or_else(|| {
+                    Error::invalid_expression(format!("Invalid builder for {}", self.data_type()))
+                })?
+            }};
+        }
+
+        // Use append_value_n for primitive builders that support batch append
+        macro_rules! append_val_n_as {
+            ($t:ty, $val:expr) => {{
+                let builder = builder_as!($t);
+                builder.append_value_n($val, num_rows);
+            }};
+        }
+
+        // Use append_value in a loop for builders without batch append (String, Binary)
+        // TODO: Remove after https://github.com/apache/arrow-rs/pull/9426 gets in
+        macro_rules! append_val_as {
+            ($t:ty, $val:expr) => {{
+                let builder = builder_as!($t);
+                for _ in 0..num_rows {
+                    builder.append_value($val);
+                }
+            }};
+        }
+
+        match self {
+            Integer(val) => append_val_n_as!(array::Int32Builder, *val),
+            Long(val) => append_val_n_as!(array::Int64Builder, *val),
+            Short(val) => append_val_n_as!(array::Int16Builder, *val),
+            Byte(val) => append_val_n_as!(array::Int8Builder, *val),
+            Float(val) => append_val_n_as!(array::Float32Builder, *val),
+            Double(val) => append_val_n_as!(array::Float64Builder, *val),
+            String(val) => append_val_as!(array::StringBuilder, val),
+            Boolean(val) => builder_as!(array::BooleanBuilder).append_n(num_rows, *val),
+            Timestamp(val) | TimestampNtz(val) => {
+                // timezone was already set at builder construction time
+                append_val_n_as!(array::TimestampMicrosecondBuilder, *val)
+            }
+            IntervalYearMonth(val) => append_val_n_as!(array::Int32Builder, *val),
+            IntervalDayTime(val) => append_val_n_as!(array::Int64Builder, *val),
+            Date(val) => append_val_n_as!(array::Date32Builder, *val),
+            Binary(val) => append_val_as!(array::BinaryBuilder, val),
+            // precision and scale were already set at builder construction time
+            Decimal(val) => append_val_n_as!(array::Decimal128Builder, val.bits()),
+            Struct(data) => {
+                let builder = builder_as!(array::StructBuilder);
+                require!(
+                    builder.num_fields() == data.fields().len(),
+                    Error::generic("Struct builder has wrong number of fields")
+                );
+                let field_builders = builder.field_builders_mut().iter_mut();
+                for (builder, value) in field_builders.zip(data.values()) {
+                    value.append_to(builder, num_rows)?;
+                }
+                // TODO: Loop can be removed after: https://github.com/apache/arrow-rs/pull/9430
+                for _ in 0..num_rows {
+                    builder.append(true);
+                }
+            }
+            Array(data) => {
+                let builder = builder_as!(array::ListBuilder<Box<dyn ArrayBuilder>>);
+                for _ in 0..num_rows {
+                    for value in data.array_elements() {
+                        value.append_to(builder.values(), 1)?;
+                    }
+                    builder.append(true);
+                }
+            }
+            Map(data) => {
+                let builder =
+                    builder_as!(array::MapBuilder<Box<dyn ArrayBuilder>, Box<dyn ArrayBuilder>>);
+                for _ in 0..num_rows {
+                    for (key, val) in data.pairs() {
+                        key.append_to(builder.keys(), 1)?;
+                        val.append_to(builder.values(), 1)?;
+                    }
+                    builder.append(true)?;
+                }
+            }
+            Null(data_type) => Self::append_null(builder, data_type, num_rows)?,
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn append_null(
+        builder: &mut dyn ArrayBuilder,
+        data_type: &DataType,
+        num_rows: usize,
+    ) -> DeltaResult<()> {
+        // Almost the same as above -- differs only in the data type parameter
+        macro_rules! builder_as {
+            ($t:ty) => {{
+                builder.as_any_mut().downcast_mut::<$t>().ok_or_else(|| {
+                    Error::invalid_expression(format!("Invalid builder for {data_type}"))
+                })?
+            }};
+        }
+
+        macro_rules! append_nulls_as {
+            ($t:ty) => {{
+                let builder = builder_as!($t);
+                builder.append_nulls(num_rows);
+            }};
+        }
+
+        match *data_type {
+            DataType::INTEGER => append_nulls_as!(array::Int32Builder),
+            DataType::LONG => append_nulls_as!(array::Int64Builder),
+            DataType::SHORT => append_nulls_as!(array::Int16Builder),
+            DataType::BYTE => append_nulls_as!(array::Int8Builder),
+            DataType::FLOAT => append_nulls_as!(array::Float32Builder),
+            DataType::DOUBLE => append_nulls_as!(array::Float64Builder),
+            DataType::STRING => append_nulls_as!(array::StringBuilder),
+            DataType::BOOLEAN => append_nulls_as!(array::BooleanBuilder),
+            DataType::TIMESTAMP | DataType::TIMESTAMP_NTZ => {
+                append_nulls_as!(array::TimestampMicrosecondBuilder)
+            }
+            DataType::DATE => append_nulls_as!(array::Date32Builder),
+            DataType::BINARY => append_nulls_as!(array::BinaryBuilder),
+            DataType::Primitive(PrimitiveType::Decimal(_)) => {
+                append_nulls_as!(array::Decimal128Builder)
+            }
+            DataType::Struct(ref stype) => {
+                // WARNING: Unlike ArrayBuilder and MapBuilder, StructBuilder always requires us to
+                // insert an entry for each child builder, even when we're inserting NULL.
+                let builder = builder_as!(array::StructBuilder);
+                require!(
+                    builder.num_fields() == stype.num_fields(),
+                    Error::generic("Struct builder has wrong number of fields")
+                );
+                let field_builders = builder.field_builders_mut().iter_mut();
+                for (builder, field) in field_builders.zip(stype.fields()) {
+                    Self::append_null(builder, &field.data_type, num_rows)?;
+                }
+                builder.append_nulls(num_rows);
+            }
+            DataType::Array(_) => append_nulls_as!(array::ListBuilder<Box<dyn ArrayBuilder>>),
+            DataType::Map(_) => {
+                // For some reason, there is no `MapBuilder::append_null` method -- even tho
+                // StructBuilder and ListBuilder both provide it.
+                let builder =
+                    builder_as!(array::MapBuilder<Box<dyn ArrayBuilder>, Box<dyn ArrayBuilder>>);
+                // TODO: Can be removed after https://github.com/apache/arrow-rs/pull/9432
+                for _ in 0..num_rows {
+                    builder.append(false)?;
+                }
+            }
+            DataType::VOID => append_nulls_as!(array::NullBuilder),
+            DataType::Variant(_) => {
+                return Err(Error::unsupported(
+                    "Variant is not supported as scalar yet.",
+                ));
+            }
+            // Intervals are exposed as their physical integer (i32 months / i64 microseconds).
+            DataType::INTERVAL_YEAR_MONTH => append_nulls_as!(array::Int32Builder),
+            DataType::INTERVAL_DAY_TIME => append_nulls_as!(array::Int64Builder),
+            #[cfg(feature = "geo-type-in-dev")]
+            DataType::Primitive(PrimitiveType::Geometry(_) | PrimitiveType::Geography(_)) => {
+                return Err(Error::unsupported("Geo is not supported as scalar yet."));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl ArrayData {
+    /// Convert kernel [`ArrayData`] to an Arrow [`ArrayRef`] of the equivalent type.
+    pub fn to_arrow(&self) -> DeltaResult<ArrayRef> {
+        let arrow_data_type = ArrowDataType::try_from_kernel(self.array_type().element_type())?;
+
+        let elements = self.array_elements();
+        let mut builder = array::make_builder(&arrow_data_type, elements.len());
+        for element in elements {
+            element.append_to(&mut builder, 1)?;
+        }
+
+        Ok(builder.finish())
+    }
+}
 
 /// Extracts a primitive kernel [`Scalar`] from the given row of an Arrow array.
 ///

@@ -28,7 +28,6 @@ use crate::arrow::datatypes::{
 };
 use crate::arrow::error::ArrowError;
 use crate::error::Error;
-use crate::parquet::arrow::PARQUET_FIELD_ID_META_KEY;
 use crate::schema::{
     ArrayType, ColumnMetadataKey, DataType, MapType, MetadataValue, PrimitiveType, StructField,
     StructType,
@@ -38,6 +37,9 @@ pub(crate) const LIST_ARRAY_ROOT: &str = "element";
 pub(crate) const MAP_ROOT_DEFAULT: &str = "key_value";
 pub(crate) const MAP_KEY_DEFAULT: &str = "key";
 pub(crate) const MAP_VALUE_DEFAULT: &str = "value";
+
+/// Arrow field metadata key for a Parquet field ID, independent of the Parquet reader.
+pub(crate) const PARQUET_FIELD_ID_META_KEY: &str = "PARQUET:field_id";
 
 /// Translate a kernel [`StructField`]'s flat (non-nested) parquet field id metadata into Arrow
 /// field metadata: rewrites kernel-side `"parquet.field.id"` to arrow-side `"PARQUET:field_id"`
@@ -661,9 +663,8 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::engine::arrow_conversion::ArrowField;
+    use crate::engine::arrow_conversion::{ArrowField, PARQUET_FIELD_ID_META_KEY};
     use crate::engine::arrow_data::unshredded_variant_arrow_type;
-    use crate::parquet::arrow::PARQUET_FIELD_ID_META_KEY;
     #[cfg(feature = "geo-type-in-dev")]
     use crate::schema::EdgeInterpolationAlgorithm;
     use crate::schema::{

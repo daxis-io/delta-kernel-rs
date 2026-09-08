@@ -15,9 +15,9 @@ use crate::arrow::array::{
 use crate::arrow::datatypes::{
     DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema,
 };
+use crate::engine::arrow_conversion::PARQUET_FIELD_ID_META_KEY;
 use crate::engine::ensure_data_types::{ensure_data_types, ValidationMode};
 use crate::error::{DeltaResult, Error};
-use crate::parquet::arrow::PARQUET_FIELD_ID_META_KEY;
 use crate::schema::{ArrayType, ColumnMetadataKey, DataType, MapType, Schema, StructField};
 
 // Apply a schema to an array. The array _must_ be a `StructArray`. Returns a `RecordBatch` where
@@ -390,7 +390,7 @@ mod apply_schema_validation_tests {
     use crate::arrow::datatypes::{
         DataType as ArrowDataType, Field as ArrowField, Fields, Schema as ArrowSchema,
     };
-    use crate::parquet::arrow::PARQUET_FIELD_ID_META_KEY;
+    use crate::engine::arrow_conversion::PARQUET_FIELD_ID_META_KEY;
     use crate::schema::{
         schema, ColumnMetadataKey, DataType, MetadataValue, StructField, StructType,
     };

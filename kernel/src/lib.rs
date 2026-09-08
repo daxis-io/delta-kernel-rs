@@ -73,9 +73,11 @@ extern crate self as delta_kernel;
 
 use std::any::Any;
 use std::cmp::Ordering;
+#[cfg(any(unix, windows))]
 use std::fs::DirEntry;
 use std::ops::Range;
 use std::sync::Arc;
+#[cfg(any(unix, windows))]
 use std::time::SystemTime;
 
 use bytes::Bytes;
@@ -129,7 +131,7 @@ pub(crate) mod row_tracking;
 pub(crate) mod clustering;
 
 mod arrow_compat;
-#[cfg(any(feature = "arrow-58", feature = "arrow-59"))]
+#[cfg(any(feature = "arrow-58", feature = "arrow-only"))]
 pub use arrow_compat::*;
 
 #[cfg(feature = "internal-api")]
@@ -252,6 +254,7 @@ impl PartialOrd for FileMeta {
     }
 }
 
+#[cfg(any(unix, windows))]
 impl TryFrom<DirEntry> for FileMeta {
     type Error = Error;
 

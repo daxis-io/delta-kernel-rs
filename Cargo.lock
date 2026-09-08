@@ -1337,6 +1337,7 @@ dependencies = [
  "delta_kernel",
  "delta_kernel_derive",
  "futures",
+ "getrandom 0.3.4",
  "hdfs-native",
  "hdfs-native-object-store",
  "indexmap",
