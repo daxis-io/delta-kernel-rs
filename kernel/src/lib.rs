@@ -116,6 +116,8 @@ pub mod table_changes;
 pub mod table_configuration;
 pub mod table_features;
 pub mod table_properties;
+#[cfg(feature = "operation-tasks")]
+pub mod tasks;
 pub mod transaction;
 pub mod transforms;
 
