@@ -4,31 +4,28 @@
 //! into Kernel; it cannot undo an allocation already performed by an engine. Accounted bytes are
 //! conservative backing-allocation charges, not total process memory.
 
+mod accounting;
 mod evaluation;
+mod machine;
+mod protocol;
 
 use std::error::Error as StdError;
 use std::fmt;
 
+pub use accounting::{
+    FooterLimits, Resource, ResourceUsage, TaskAccounting, TaskLimits, TaskUsage,
+};
 pub use evaluation::{
     AccountedEngineData, EvaluationLimits, EvaluationPage, EvaluationPageLimits, EvaluationReader,
     EvaluationUsage,
 };
+pub use machine::{TaskAction, TaskMachine, TaskState, TaskStatus};
+pub use protocol::{
+    CancelDisposition, CancelReason, CpuSlice, EvaluationKey, FileDescriptor, OperationTask,
+    RequestKey, TaskId, TaskRequest, TaskRequestV1, TaskResponseV1, TaskStep,
+};
 
 use crate::Error;
-
-/// An independently limited resource used by an operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Resource {
-    /// Internal evaluation pages, including empty pages used to establish EOF.
-    EvaluationPages,
-    /// Internal evaluation batches.
-    EvaluationBatches,
-    /// Internal evaluation rows, including logically unselected rows.
-    EvaluationRows,
-    /// Conservative physical batch and page-container bytes.
-    EvaluationBytes,
-}
 
 /// A configured limit was exceeded, or its checked accounting overflowed.
 ///
@@ -65,6 +62,10 @@ pub enum FailureKind {
     Engine,
     /// Execution was cancelled.
     Cancelled,
+    /// A matching response has invalid contents or an inconsistent evaluation identity.
+    MalformedResponse,
+    /// A checked request identity cannot advance without wrapping.
+    IdentityExhausted,
 }
 
 impl fmt::Display for FailureKind {
@@ -73,6 +74,8 @@ impl fmt::Display for FailureKind {
             Self::ResourceExhausted(error) => error.fmt(f),
             Self::Engine => f.write_str("engine operation failed"),
             Self::Cancelled => f.write_str("operation cancelled"),
+            Self::MalformedResponse => f.write_str("malformed task response"),
+            Self::IdentityExhausted => f.write_str("task identity exhausted"),
         }
     }
 }
@@ -87,6 +90,11 @@ pub struct OperationFailure {
 }
 
 impl OperationFailure {
+    /// Reports invalid contents of a matching response without retaining the payload.
+    pub fn malformed_response() -> Self {
+        Self::terminal(FailureKind::MalformedResponse)
+    }
+
     /// Takes ownership of an engine error with its typed category.
     ///
     /// Drivers classify typed sources directly; they must not parse error messages. A Kernel
@@ -156,12 +164,36 @@ impl StdError for OperationFailure {
 pub enum TaskProtocolError {
     /// Limits cannot represent a progressing, bounded page.
     InvalidLimits,
+    /// The task has not been started.
+    NotStarted,
+    /// The task has already been started.
+    AlreadyStarted,
+    /// A request must be resumed or cancelled before more CPU work.
+    PendingRequest,
+    /// No outstanding request has the supplied key.
+    WrongKey,
+    /// The response variant does not match the outstanding request.
+    WrongKind,
+    /// A completed, failed or cancelled task cannot be resumed.
+    Terminal,
+    /// An identity contains a reserved zero value.
+    InvalidIdentity,
+    /// The process-local driver identity allocator has exhausted its range.
+    IdentityExhausted,
 }
 
 impl fmt::Display for TaskProtocolError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidLimits => f.write_str("invalid task limits"),
+            Self::NotStarted => f.write_str("task not started"),
+            Self::AlreadyStarted => f.write_str("task already started"),
+            Self::PendingRequest => f.write_str("task has an outstanding request"),
+            Self::WrongKey => f.write_str("wrong task request key"),
+            Self::WrongKind => f.write_str("wrong task response kind"),
+            Self::Terminal => f.write_str("task is terminal"),
+            Self::InvalidIdentity => f.write_str("task identities must be nonzero"),
+            Self::IdentityExhausted => f.write_str("driver identity exhausted"),
         }
     }
 }
