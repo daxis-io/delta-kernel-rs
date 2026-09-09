@@ -520,17 +520,12 @@ impl DynamicScan {
             &self.file_constant_columns,
         )?;
 
-        let fields = input_schema
-            .fields_of_path(&self.dv_column)
-            .map_err(|err| {
-                Error::generic(format!(
-                    "dynamic scan: deletion-vector column `{}` is invalid: {err}",
-                    self.dv_column
-                ))
-            })?;
-        let Some((field, _ancestors)) = fields.split_last() else {
-            return Err(Error::internal_error("fields_of_path returned no fields"));
-        };
+        let field = input_schema.field_at(&self.dv_column).map_err(|err| {
+            Error::generic(format!(
+                "dynamic scan: deletion-vector column `{}` is invalid: {err}",
+                self.dv_column
+            ))
+        })?;
         let expected = &*DELETION_VECTOR_DATA_TYPE;
         if field.data_type() != expected {
             return Err(Error::generic(format!(
@@ -554,8 +549,13 @@ impl DynamicScan {
         column: &ColumnName,
         expected_type: &DataType,
     ) -> DeltaResult<()> {
-        let fields = schema.fields_of_path(column)?;
-        let Some((field, ancestors)) = fields.split_last() else {
+        let mut field = None;
+        let mut nullable = false;
+        schema.visit_fields_of_path(column, |current| {
+            nullable |= current.is_nullable();
+            field = Some(current);
+        })?;
+        let Some(field) = field else {
             return Err(Error::internal_error("fields_of_path returned no fields"));
         };
         if field.data_type() != expected_type {
@@ -564,7 +564,7 @@ impl DynamicScan {
                 field.data_type()
             )));
         }
-        if field.is_nullable() || ancestors.iter().any(|field| field.is_nullable()) {
+        if nullable {
             return Err(Error::generic(format!(
                 "dynamic scan: required column `{column}` is nullable"
             )));
