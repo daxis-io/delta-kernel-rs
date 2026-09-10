@@ -5,9 +5,10 @@ use std::cell::Cell;
 use std::sync::Arc;
 
 use delta_kernel::actions::deletion_vector::DeletionVectorDescriptor;
-use delta_kernel::expressions::ColumnName;
-use delta_kernel::plans::ir::nodes::{DynamicScan, FileType};
+use delta_kernel::expressions::{ColumnName, Scalar};
+use delta_kernel::plans::ir::nodes::{DynamicScan, FileType, Operator};
 use delta_kernel::schema::{DataType, StructField, StructType, ToSchema};
+use delta_kernel::tasks::{AdmittedPlan, PlanAdmissionError, Resource, TaskLimits};
 use delta_kernel::FileMeta;
 
 thread_local! {
@@ -1502,5 +1503,51 @@ fn admitted_fixed_width_producer_preflights_metadata_and_allocations() {
 
     let shape = admitted.shape();
     let encoded = delta_kernel::plans::Operation::QueryPlan(admitted.into_plan()).to_proto_bytes();
+    assert!(shape.encoded_bytes() >= encoded.len());
+}
+
+#[test]
+fn admitted_string_values_preflight_variable_width_storage() {
+    let values = ["", "nul\0snow 雪", "tail"];
+    let limits = TaskLimits::qualification();
+    ALLOCATED_BYTES.with(|count| count.set(Some(0)));
+    let admitted = AdmittedPlan::try_string_values("text", &[], &values, &limits).unwrap();
+    let allocated_bytes = ALLOCATED_BYTES.with(|count| count.replace(None).unwrap());
+
+    assert!(allocated_bytes <= admitted.retained_bytes());
+    let retained_bytes = admitted.retained_bytes();
+    let shape = admitted.shape();
+    let too_small = limits.with_limit(Resource::TaskStateBytes, retained_bytes - 1);
+    ALLOCATIONS.with(|count| count.set(Some(0)));
+    let result = AdmittedPlan::try_string_values("text", &[], &values, &too_small);
+    let allocations = ALLOCATIONS.with(|count| count.replace(None).unwrap());
+    assert!(matches!(
+        result,
+        Err(PlanAdmissionError::ResourceExhausted(error))
+            if error.resource == Resource::TaskStateBytes
+    ));
+    assert_eq!(allocations, 0, "rejection must precede producer allocation");
+
+    let encoded_limit = limits.with_limit(Resource::PlanEncodedBytes, shape.encoded_bytes() - 1);
+    ALLOCATIONS.with(|count| count.set(Some(0)));
+    let result = AdmittedPlan::try_string_values("text", &[], &values, &encoded_limit);
+    let allocations = ALLOCATIONS.with(|count| count.replace(None).unwrap());
+    assert!(matches!(
+        result,
+        Err(PlanAdmissionError::ResourceExhausted(error))
+            if error.resource == Resource::PlanEncodedBytes
+    ));
+    assert_eq!(allocations, 0, "encoded rejection must not allocate");
+
+    let plan = admitted.into_plan();
+    let Operator::Values(values) = &plan.nodes[0].op else {
+        panic!("expected Values source")
+    };
+    assert_eq!(values.schema.fields().len(), 1);
+    let field = values.schema.fields().next().unwrap();
+    assert_eq!(field.data_type(), &DataType::STRING);
+    assert!(!field.is_nullable());
+    assert_eq!(values.rows[1][0], Scalar::String("nul\0snow 雪".into()));
+    let encoded = delta_kernel::plans::Operation::QueryPlan(plan).to_proto_bytes();
     assert!(shape.encoded_bytes() >= encoded.len());
 }

@@ -32,9 +32,11 @@ pub struct PlanShape {
 }
 
 impl PlanShape {
-    pub(super) fn fixed_i64_values(
+    pub(super) fn fixed_values(
         field_name: &str,
+        data_type: &DataType,
         rows: usize,
+        variable_value_bytes: usize,
         metadata_encoded: usize,
         additional_work: usize,
         limits: &TaskLimits,
@@ -55,7 +57,7 @@ impl PlanShape {
         walk.schema_enter(1)?;
         walk.schema_enter(1)?;
         walk.string(field_name)?;
-        walk.data_type(&DataType::LONG, 1)?;
+        walk.data_type(data_type, 1)?;
         walk.add(FIELD)?;
         walk.add(metadata_encoded)?;
         walk.work(additional_work)?;
@@ -64,6 +66,7 @@ impl PlanShape {
             walk.enter(1)?;
             walk.add(FIELD)?;
         }
+        walk.add(variable_value_bytes)?;
         Ok(Self {
             nodes: 1,
             depth: 1,

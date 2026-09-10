@@ -39,6 +39,21 @@ struct OwnedMetadataEntry {
     value: MetadataValue,
 }
 
+#[derive(Clone, Copy)]
+enum FixedValues<'a> {
+    I64(&'a [i64]),
+    String(&'a [&'a str]),
+}
+
+impl FixedValues<'_> {
+    fn len(self) -> usize {
+        match self {
+            Self::I64(values) => values.len(),
+            Self::String(values) => values.len(),
+        }
+    }
+}
+
 /// A plan whose retained allocations and executable shape were admitted before construction.
 ///
 /// There is deliberately no conversion from [`Plan`]. Each constructor is an allocation owner
@@ -64,6 +79,33 @@ impl AdmittedPlan {
         field_name: &str,
         metadata: &[PlanMetadataEntry<'_>],
         values: &[i64],
+        limits: &TaskLimits,
+    ) -> Result<Self, PlanAdmissionError> {
+        Self::try_fixed_values(field_name, metadata, FixedValues::I64(values), limits)
+    }
+
+    /// Builds one non-nullable STRING `Values` source from borrowed strings.
+    ///
+    /// String bytes, row containers, schema, metadata, and the encoded plan are bounded before
+    /// any producer allocation. The accepted metadata subset matches [`Self::try_i64_values`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlanAdmissionError`] when a limit is exceeded or metadata is unsupported or
+    /// duplicated.
+    pub fn try_string_values<'a>(
+        field_name: &str,
+        metadata: &[PlanMetadataEntry<'_>],
+        values: &'a [&'a str],
+        limits: &TaskLimits,
+    ) -> Result<Self, PlanAdmissionError> {
+        Self::try_fixed_values(field_name, metadata, FixedValues::String(values), limits)
+    }
+
+    fn try_fixed_values(
+        field_name: &str,
+        metadata: &[PlanMetadataEntry<'_>],
+        values: FixedValues<'_>,
         limits: &TaskLimits,
     ) -> Result<Self, PlanAdmissionError> {
         let mut metadata_encoded = 0usize;
@@ -158,15 +200,31 @@ impl AdmittedPlan {
         )?;
         check_limit(Resource::MetadataAllocatedBytes, metadata_dynamic, limits)?;
 
-        let shape = PlanShape::fixed_i64_values(
+        let (data_type, value_bytes) = match values {
+            FixedValues::I64(_) => (DataType::LONG, 0),
+            FixedValues::String(values) => {
+                let bytes = values.iter().try_fold(0usize, |used, value| {
+                    checked_add(used, value.len(), Resource::TaskStateBytes, limits)
+                })?;
+                (DataType::STRING, bytes)
+            }
+        };
+        let shape = PlanShape::fixed_values(
             field_name,
+            &data_type,
             values.len(),
+            value_bytes,
             metadata_encoded,
             comparison_work,
             limits,
         )?;
-        let retained_bytes =
-            fixed_plan_backing_bound(field_name.len(), metadata_dynamic, values.len(), limits)?;
+        let retained_bytes = fixed_plan_backing_bound(
+            field_name.len(),
+            metadata_dynamic,
+            values.len(),
+            value_bytes,
+            limits,
+        )?;
         check_limit(Resource::TaskStateBytes, retained_bytes, limits)?;
 
         let metadata_source: Box<[OwnedMetadataEntry]> = metadata
@@ -180,14 +238,20 @@ impl AdmittedPlan {
         for entry in &metadata_source {
             metadata_map.insert(owned_string(&entry.key), clone_metadata(&entry.value));
         }
-        let mut field = StructField::not_null(owned_string(field_name), DataType::LONG);
+        let mut field = StructField::not_null(owned_string(field_name), data_type);
         field.metadata = metadata_map;
         // A single primitive field cannot violate nested or duplicate-field schema invariants.
         let schema = Arc::new(StructType::new_unchecked([field]));
-        let rows = values
-            .iter()
-            .map(|value| vec![Scalar::Long(*value)])
-            .collect();
+        let rows = match values {
+            FixedValues::I64(values) => values
+                .iter()
+                .map(|value| vec![Scalar::Long(*value)])
+                .collect(),
+            FixedValues::String(values) => values
+                .iter()
+                .map(|value| vec![Scalar::String(owned_string(value))])
+                .collect(),
+        };
         let plan = Plan {
             nodes: vec![PlanNode::new(Values::new(schema, rows), vec![])],
         };
@@ -370,6 +434,7 @@ fn fixed_plan_backing_bound(
     field_name_len: usize,
     metadata_bytes: usize,
     rows: usize,
+    value_bytes: usize,
     limits: &TaskLimits,
 ) -> Result<usize, PlanAdmissionError> {
     let row_slots = checked_mul(
@@ -396,6 +461,7 @@ fn fixed_plan_backing_bound(
     let plan_backing = size_of::<PlanNode>();
     let mut total = checked_add(row_slots, schema_backing, Resource::TaskStateBytes, limits)?;
     total = checked_add(total, plan_backing, Resource::TaskStateBytes, limits)?;
+    total = checked_add(total, value_bytes, Resource::TaskStateBytes, limits)?;
     checked_add(total, metadata_bytes, Resource::TaskStateBytes, limits)
 }
 
@@ -446,7 +512,16 @@ fn retained_backing_diagnostic(plan: &Plan, source: &[OwnedMetadataEntry]) -> us
         + values
             .rows
             .iter()
-            .map(|row| row.capacity() * size_of::<Scalar>())
+            .map(|row| {
+                row.capacity() * size_of::<Scalar>()
+                    + row
+                        .iter()
+                        .map(|value| match value {
+                            Scalar::String(value) => value.capacity(),
+                            _ => 0,
+                        })
+                        .sum::<usize>()
+            })
             .sum::<usize>()
         + field.name.capacity() * 2
         + plan.nodes.capacity() * size_of::<PlanNode>()
