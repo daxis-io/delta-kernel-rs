@@ -2,7 +2,8 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{
-    EvaluationPage, EvaluationPageLimits, FooterLimits, OperationFailure, TaskProtocolError,
+    AdmittedPlan, EvaluationLimits, EvaluationPage, EvaluationPageLimits, FooterLimits,
+    OperationFailure, TaskProtocolError,
 };
 use crate::ParquetFooter;
 
@@ -197,6 +198,15 @@ pub enum TaskRequestV1 {
         /// The footer, schema, row-group, metadata and page-index allowances.
         limits: FooterLimits,
     },
+    /// Transfers one admitted plan to driver-owned evaluation state.
+    EvaluationStart {
+        /// Identity the driver must bind to the transferred plan.
+        evaluation: EvaluationKey,
+        /// Preflighted plan ownership transferred exactly once.
+        plan: AdmittedPlan,
+        /// Per-page and cumulative bounds installed with driver-owned evaluation state.
+        limits: EvaluationLimits,
+    },
     /// Requests another page of an already admitted driver-owned evaluation.
     Evaluation {
         /// Identity bound to this task by the driver.
@@ -334,6 +344,7 @@ impl fmt::Debug for TaskRequestV1 {
             Self::Read { .. } => "Read(..)",
             Self::Head { .. } => "Head(..)",
             Self::Footer { .. } => "Footer(..)",
+            Self::EvaluationStart { .. } => "EvaluationStart(..)",
             Self::Evaluation { .. } => "Evaluation(..)",
         })
     }
@@ -388,6 +399,7 @@ impl TaskRequestV1 {
             Self::Read { .. } => ResponseKind::Read,
             Self::Head { .. } => ResponseKind::Head,
             Self::Footer { .. } => ResponseKind::Footer,
+            Self::EvaluationStart { evaluation, .. } => ResponseKind::Evaluation(*evaluation),
             Self::Evaluation { evaluation, .. } => ResponseKind::Evaluation(*evaluation),
         }
     }
@@ -402,6 +414,7 @@ impl TaskRequestV1 {
             Self::Read { path, .. } | Self::Head { path } | Self::Footer { path, .. } => {
                 path.capacity()
             }
+            Self::EvaluationStart { plan, .. } => plan.retained_bytes(),
             Self::Evaluation { .. } => 0,
         };
         std::mem::size_of::<TaskRequest>().checked_add(backing)

@@ -7,7 +7,7 @@ use delta_kernel::engine_data::RowVisitor;
 use delta_kernel::expressions::{ArrayData, ColumnName};
 use delta_kernel::schema::SchemaRef;
 use delta_kernel::tasks::{
-    AccountedEngineData, CancelDisposition, CancelReason, CpuSlice, EvaluationKey,
+    AccountedEngineData, AdmittedPlan, CancelDisposition, CancelReason, CpuSlice, EvaluationKey,
     EvaluationLimits, EvaluationPage, EvaluationPageLimits, EvaluationReader, FailureKind,
     OperationFailure, OperationTask, RequestKey, Resource, ResourceExhausted, TaskAccounting,
     TaskAction, TaskId, TaskLimits, TaskMachine, TaskProtocolError, TaskRequestV1, TaskResponseV1,
@@ -465,17 +465,20 @@ fn final_retained_state_overflow_cannot_become_successful_completion() {
     );
 }
 
-struct EmptyBatch(Arc<AtomicUsize>);
+struct TestBatch {
+    rows: usize,
+    drops: Arc<AtomicUsize>,
+}
 
-impl Drop for EmptyBatch {
+impl Drop for TestBatch {
     fn drop(&mut self) {
-        self.0.fetch_add(1, Ordering::Relaxed);
+        self.drops.fetch_add(1, Ordering::Relaxed);
     }
 }
 
-impl EngineData for EmptyBatch {
+impl EngineData for TestBatch {
     fn len(&self) -> usize {
-        0
+        self.rows
     }
     fn visit_rows(&self, _: &[ColumnName], visitor: &mut dyn RowVisitor) -> DeltaResult<()> {
         visitor.visit(0, &[])
@@ -491,10 +494,166 @@ impl EngineData for EmptyBatch {
     }
 }
 
-impl AccountedEngineData for EmptyBatch {
+impl AccountedEngineData for TestBatch {
     fn accounted_bytes(&self) -> Result<usize, ResourceExhausted> {
         Ok(64)
     }
+}
+
+struct EvaluationStartState {
+    evaluation: EvaluationKey,
+    plan: Option<AdmittedPlan>,
+    rows: usize,
+}
+
+impl TaskState for EvaluationStartState {
+    type Output = usize;
+
+    fn retained_bytes(&self) -> Result<usize, ResourceExhausted> {
+        Ok(self.plan.as_ref().map_or(0, AdmittedPlan::retained_bytes))
+    }
+
+    fn advance(
+        &mut self,
+        _: CpuSlice,
+        _: &TaskAccounting,
+    ) -> Result<TaskAction<Self::Output>, OperationFailure> {
+        Ok(TaskAction::Request)
+    }
+
+    fn take_request(&mut self, _: &TaskAccounting) -> Result<TaskRequestV1, OperationFailure> {
+        Ok(match self.plan.take() {
+            Some(plan) => TaskRequestV1::EvaluationStart {
+                evaluation: self.evaluation,
+                plan,
+                limits: evaluation_start_limits(),
+            },
+            None => TaskRequestV1::Evaluation {
+                evaluation: self.evaluation,
+                limits: evaluation_start_page_limits(),
+            },
+        })
+    }
+
+    fn resume(
+        &mut self,
+        response: TaskResponseV1,
+        _: CpuSlice,
+        _: &TaskAccounting,
+    ) -> Result<TaskAction<Self::Output>, OperationFailure> {
+        let TaskResponseV1::Evaluation { page, .. } = response else {
+            panic!("machine must validate response kind before calling state")
+        };
+        let Some(page) = page else {
+            return Ok(TaskAction::Complete(self.rows));
+        };
+        self.rows += page.num_rows();
+        Ok(TaskAction::Request)
+    }
+}
+
+#[test]
+fn admitted_plan_transfers_once_then_evaluation_requests_use_only_driver_identity() {
+    let limits = TaskLimits::qualification();
+    let id = TaskId::allocate().unwrap();
+    let evaluation = EvaluationKey::allocate(id.get()).unwrap();
+    let plan = AdmittedPlan::try_i64_values("value", &[], &[1, 2, 3], &limits).unwrap();
+    let plan_bytes = plan.retained_bytes();
+    let mut task = TaskMachine::new(
+        id,
+        EvaluationStartState {
+            evaluation,
+            plan: Some(plan),
+            rows: 0,
+        },
+        limits,
+    )
+    .unwrap();
+    let fixed_task_bytes = std::mem::size_of_val(&task);
+    assert_eq!(
+        task.accounting().usage(Resource::TaskStateBytes).live(),
+        fixed_task_bytes + plan_bytes
+    );
+
+    let TaskStep::Execute(start) = task.start(cpu()).unwrap() else {
+        panic!("expected evaluation start")
+    };
+    let task_state = task.accounting().usage(Resource::TaskStateBytes);
+    assert_eq!(task_state.live(), fixed_task_bytes);
+    assert_eq!(
+        task_state.peak_live(),
+        fixed_task_bytes + std::mem::size_of_val(&start) + plan_bytes
+    );
+    let start_key = start.key;
+    let TaskRequestV1::EvaluationStart {
+        evaluation: actual,
+        plan,
+        limits: actual_limits,
+    } = start.operation
+    else {
+        panic!("expected one-shot admitted plan transfer")
+    };
+    assert_eq!(actual, evaluation);
+    assert_eq!(actual_limits, evaluation_start_limits());
+    assert_eq!(plan.into_plan().nodes.len(), 1);
+
+    assert_eq!(
+        task.resume(start_key, Ok(TaskResponseV1::Head { size: 3 }), cpu())
+            .unwrap_err(),
+        TaskProtocolError::WrongKind
+    );
+    assert_eq!(task.pending_key(), Some(start_key));
+
+    let drops = Arc::new(AtomicUsize::new(0));
+    let page = EvaluationPage::try_new(
+        vec![Box::new(TestBatch {
+            rows: 3,
+            drops: drops.clone(),
+        })],
+        evaluation_start_page_limits(),
+    )
+    .unwrap();
+    let TaskStep::Execute(next) = task
+        .resume(
+            start_key,
+            Ok(TaskResponseV1::Evaluation {
+                evaluation,
+                page: Some(page),
+            }),
+            cpu(),
+        )
+        .unwrap()
+    else {
+        panic!("expected identity-only evaluation request")
+    };
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+    assert!(matches!(
+        next.operation,
+        TaskRequestV1::Evaluation {
+            evaluation: actual,
+            ..
+        } if actual == evaluation
+    ));
+    assert!(matches!(
+        task.resume(
+            next.key,
+            Ok(TaskResponseV1::Evaluation {
+                evaluation,
+                page: None,
+            }),
+            cpu(),
+        )
+        .unwrap(),
+        TaskStep::Complete(3)
+    ));
+}
+
+fn evaluation_start_page_limits() -> EvaluationPageLimits {
+    EvaluationPageLimits::new(1, 3, 128).unwrap()
+}
+
+fn evaluation_start_limits() -> EvaluationLimits {
+    EvaluationLimits::new(evaluation_start_page_limits(), 4, 4, 12, 512)
 }
 
 struct FixedSource {
@@ -568,7 +727,10 @@ fn cancellation_drops_task_page_before_driver_releases_its_evaluation_source() {
     let page_drops = Arc::new(AtomicUsize::new(0));
     let source_drops = Arc::new(AtomicUsize::new(0));
     let source = FixedSource {
-        batch: Some(Box::new(EmptyBatch(page_drops.clone()))),
+        batch: Some(Box::new(TestBatch {
+            rows: 0,
+            drops: page_drops.clone(),
+        })),
         drops: source_drops.clone(),
     };
     let mut driver = EvaluationReader::new(
