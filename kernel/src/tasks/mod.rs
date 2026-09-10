@@ -5,6 +5,7 @@
 //! conservative backing-allocation charges, not total process memory.
 
 mod accounting;
+mod driver;
 mod evaluation;
 mod machine;
 mod plan_admission;
@@ -17,6 +18,7 @@ use std::fmt;
 pub use accounting::{
     FooterLimits, Resource, ResourceUsage, TaskAccounting, TaskLimits, TaskUsage,
 };
+pub use driver::{AdmittedEvaluationSource, EvaluationDriver};
 pub use evaluation::{
     AccountedEngineData, EvaluationLimits, EvaluationPage, EvaluationPageLimits, EvaluationReader,
     EvaluationUsage,
