@@ -20,6 +20,14 @@ struct TestBatch {
     drops: Arc<AtomicUsize>,
 }
 
+struct DropWatch(Arc<AtomicUsize>);
+
+impl Drop for DropWatch {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 impl Drop for TestBatch {
     fn drop(&mut self) {
         self.drops.fetch_add(1, Ordering::Relaxed);
@@ -330,9 +338,12 @@ fn cancellation_releases_a_completed_page_and_active_source_without_resumption()
 #[test]
 fn cancellation_before_effect_completion_drops_the_plan_without_compiling() {
     let compiles = Arc::new(AtomicUsize::new(0));
+    let compiler_drops = Arc::new(AtomicUsize::new(0));
     let (id, mut driver) = EvaluationDriver::allocate({
         let compiles = compiles.clone();
+        let watch = DropWatch(compiler_drops.clone());
         move |_: AdmittedPlan, _: EvaluationLimits| {
+            let _ = &watch;
             compiles.fetch_add(1, Ordering::Relaxed);
             unreachable!("cancelled queued plans must not compile")
         }
@@ -362,6 +373,7 @@ fn cancellation_before_effect_completion_drops_the_plan_without_compiling() {
     );
     driver.cancel(Some(key)).unwrap();
     assert_eq!(compiles.load(Ordering::Relaxed), 0);
+    assert_eq!(compiler_drops.load(Ordering::Relaxed), 1);
     assert_eq!(driver.complete_effect(), Err(TaskProtocolError::Terminal));
 }
 

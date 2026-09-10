@@ -18,7 +18,10 @@ use std::fmt;
 pub use accounting::{
     FooterLimits, Resource, ResourceUsage, TaskAccounting, TaskLimits, TaskUsage,
 };
-pub use driver::{AdmittedEvaluationSource, EvaluationDriver};
+pub use driver::{
+    AdmittedEvaluationSource, AdmittedFooter, AdmittedHead, AdmittedIoSource, AdmittedListingPage,
+    AdmittedRead, EvaluationDriver, IoUsage, ObjectIdentity, OperationDriver,
+};
 pub use evaluation::{
     AccountedEngineData, EvaluationLimits, EvaluationPage, EvaluationPageLimits, EvaluationReader,
     EvaluationUsage,
