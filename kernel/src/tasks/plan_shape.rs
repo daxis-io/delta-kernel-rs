@@ -1,6 +1,8 @@
 use std::error::Error;
 use std::fmt::{self, Write};
 
+use serde_json::Value;
+
 use super::{Resource, ResourceExhausted, TaskLimits};
 use crate::expressions::{ColumnName, Expression, Predicate, Scalar};
 use crate::plans::ir::nodes::{Agg, Operator, ScanFile};
@@ -51,6 +53,57 @@ impl PlanShape {
         limits: &TaskLimits,
         scratch: &mut [usize],
     ) -> Result<Self, PlanShapeError> {
+        Self::check_inner(plan, limits, scratch, false)
+    }
+
+    /// Inspects structure and literal compatibility without allocating or retaining `plan`.
+    ///
+    /// Uses the same caller-owned `scratch` and resource limits as [`Self::check`]. Also checks
+    /// Values row widths, scan constants, scalar container types/nullability, decimal ranges and
+    /// array/map type tags. Struct literals must match declared field order and metadata.
+    /// Comparisons consume work units before inspecting their inputs.
+    ///
+    /// This is still a measurement, not an admitted plan. General operator/expression typing,
+    /// schema-name uniqueness under Unicode lowercase, metadata-column schema invariants and
+    /// canonical allocation ownership require separate admission. Standalone struct literals
+    /// reject exact duplicate names; Unicode-fold duplicates are not checked here.
+    ///
+    /// Returns [`PlanShapeError::InvalidLiteral`] for incompatible literals or source constants,
+    /// or the structural/resource errors documented by [`Self::check`].
+    pub fn check_literals(
+        plan: &Plan,
+        limits: &TaskLimits,
+        scratch: &mut [usize],
+    ) -> Result<Self, PlanShapeError> {
+        Self::check_inner(plan, limits, scratch, true)
+    }
+
+    /// Number of plan nodes inspected, including disconnected nodes.
+    pub fn nodes(&self) -> usize {
+        self.nodes
+    }
+
+    /// Longest path through the topology, with a source at depth one.
+    pub fn depth(&self) -> usize {
+        self.depth
+    }
+
+    /// Conservative protobuf size bound, including the query-operation envelope.
+    pub fn encoded_bytes(&self) -> usize {
+        self.encoded_bytes
+    }
+
+    /// Traversal work, including input edges, formatting writes and sparse hash-table capacity
+    /// scans.
+    pub fn work_units(&self) -> usize {
+        self.work_units
+    }
+    fn check_inner(
+        plan: &Plan,
+        limits: &TaskLimits,
+        scratch: &mut [usize],
+        literals: bool,
+    ) -> Result<Self, PlanShapeError> {
         if plan.nodes.is_empty() {
             return Err(PlanShapeError::Empty);
         }
@@ -59,6 +112,7 @@ impl PlanShape {
             encoded: 0,
             work: 0,
             schema_nodes: 0,
+            literals,
         };
         walk.check(Resource::PlanNodes, plan.nodes.len())?;
         let depths =
@@ -111,27 +165,6 @@ impl PlanShape {
             work_units: walk.work,
         })
     }
-
-    /// Number of plan nodes inspected, including disconnected nodes.
-    pub fn nodes(&self) -> usize {
-        self.nodes
-    }
-
-    /// Longest path through the topology, with a source at depth one.
-    pub fn depth(&self) -> usize {
-        self.depth
-    }
-
-    /// Conservative protobuf size bound, including the query-operation envelope.
-    pub fn encoded_bytes(&self) -> usize {
-        self.encoded_bytes
-    }
-
-    /// Traversal work, including input edges, formatting writes and sparse hash-table capacity
-    /// scans.
-    pub fn work_units(&self) -> usize {
-        self.work_units
-    }
 }
 
 /// A structural preflight failure containing no caller-owned payload or allocated message.
@@ -152,6 +185,8 @@ pub enum PlanShapeError {
     },
     /// Opaque callbacks and unknown executable expressions cannot enter task mode.
     UnsupportedExpression,
+    /// A literal payload, declared type, Values row or scan constant is incompatible.
+    InvalidLiteral,
     /// A checked resource allowance or the nesting ceiling was exceeded.
     ResourceExhausted(ResourceExhausted),
     /// The caller-provided workspace cannot hold the topology depths.
@@ -168,6 +203,7 @@ impl fmt::Display for PlanShapeError {
             Self::InvalidArity { node } => write!(f, "invalid input count at plan node {node}"),
             Self::InvalidInput { node } => write!(f, "invalid input index at plan node {node}"),
             Self::UnsupportedExpression => f.write_str("unsupported task expression"),
+            Self::InvalidLiteral => f.write_str("invalid task literal"),
             Self::ResourceExhausted(error) => error.fmt(f),
             Self::ScratchTooSmall { required } => {
                 write!(f, "plan scratch requires {required} entries")
@@ -183,6 +219,7 @@ struct Walk<'a> {
     encoded: usize,
     work: usize,
     schema_nodes: usize,
+    literals: bool,
 }
 
 impl Walk<'_> {
@@ -267,8 +304,13 @@ impl Walk<'_> {
                 self.schema(&n.schema, 1)?;
                 for row in &n.rows {
                     self.enter(1)?;
+                    if self.literals && row.len() != n.schema.fields().len() {
+                        return Err(PlanShapeError::InvalidLiteral);
+                    }
+                    let mut fields = n.schema.fields();
                     for value in row {
-                        self.scalar(value, 1)?;
+                        let expected = if self.literals { fields.next() } else { None };
+                        self.scalar_as(value, 1, expected)?;
                     }
                 }
                 Ok(())
@@ -340,15 +382,38 @@ impl Walk<'_> {
     ) -> Result<(), PlanShapeError> {
         self.schema(schema, 1)?;
         self.work(constants.len())?;
-        for name in constants {
+        for (index, name) in constants.iter().enumerate() {
             self.string(name)?;
+            if self.literals {
+                for previous in &constants[..index] {
+                    if self.same_string(name, previous)? {
+                        return Err(PlanShapeError::InvalidLiteral);
+                    }
+                }
+                let field = self
+                    .literal_field(schema, name)?
+                    .ok_or(PlanShapeError::InvalidLiteral)?;
+                self.work(field.metadata.capacity())?;
+                if field.is_metadata_column() {
+                    return Err(PlanShapeError::InvalidLiteral);
+                }
+            }
         }
         for file in files {
             self.enter(1)?;
             self.add(FIELD * 3)?; // FileMeta message and its numeric fields
             self.string(file.meta.location.as_str())?;
-            for value in &file.file_constants {
-                self.scalar(value, 1)?;
+            if self.literals && file.file_constants.len() != constants.len() {
+                return Err(PlanShapeError::InvalidLiteral);
+            }
+            for (index, value) in file.file_constants.iter().enumerate() {
+                let expected = if self.literals {
+                    let name = &constants[index];
+                    self.literal_field(schema, name)?
+                } else {
+                    None
+                };
+                self.scalar_as(value, 1, expected)?;
             }
         }
         Ok(())
@@ -390,7 +455,10 @@ impl Walk<'_> {
             DataType::Primitive(p) => {
                 self.add(FIELD)?; // PrimitiveType
                 match p {
-                    PrimitiveType::Decimal(_) => self.add(FIELD * 3),
+                    PrimitiveType::Decimal(d) => {
+                        self.decimal_type(d)?;
+                        self.add(FIELD * 3)
+                    }
                     #[cfg(feature = "geo-type-in-dev")]
                     PrimitiveType::Geometry(g) => {
                         self.add(FIELD)?;
@@ -426,34 +494,93 @@ impl Walk<'_> {
 
     fn array_type(&mut self, ty: &ArrayType, depth: usize) -> Result<(), PlanShapeError> {
         self.schema_enter(depth)?;
+        if self.literals && ty.type_name != "array" {
+            return Err(PlanShapeError::InvalidLiteral);
+        }
         self.add(FIELD)?;
         self.data_type(ty.element_type(), depth + 1)
     }
 
     fn map_type(&mut self, ty: &MapType, depth: usize) -> Result<(), PlanShapeError> {
         self.schema_enter(depth)?;
+        if self.literals && ty.type_name != "map" {
+            return Err(PlanShapeError::InvalidLiteral);
+        }
         self.add(FIELD)?;
         self.data_type(ty.key_type(), depth + 1)?;
         self.data_type(ty.value_type(), depth + 1)
     }
 
     fn scalar(&mut self, value: &Scalar, depth: usize) -> Result<(), PlanShapeError> {
+        self.scalar_as(value, depth, None)
+    }
+
+    fn scalar_as(
+        &mut self,
+        value: &Scalar,
+        depth: usize,
+        expected: Option<&StructField>,
+    ) -> Result<(), PlanShapeError> {
+        self.scalar_typed(
+            value,
+            depth,
+            expected.map(|f| (f.data_type(), f.is_nullable())),
+        )
+    }
+
+    fn scalar_typed(
+        &mut self,
+        value: &Scalar,
+        depth: usize,
+        expected: Option<(&DataType, bool)>,
+    ) -> Result<(), PlanShapeError> {
         self.enter(depth)?;
+        if self.literals {
+            if let Some((ty, nullable)) = expected {
+                if (!nullable && value.is_null()) || !self.scalar_type_matches(value, ty, depth)? {
+                    return Err(PlanShapeError::InvalidLiteral);
+                }
+            }
+        }
         match value {
             Scalar::String(s) => self.string(s),
             Scalar::Binary(b) => {
                 self.add(FIELD)?;
                 self.add(b.len())
             }
-            Scalar::Decimal(_) => self.add(FIELD * 5 + 16),
+            Scalar::Decimal(d) => {
+                self.decimal_type(d.ty())?;
+                if self.literals && d.bits().unsigned_abs() >= 10u128.pow(u32::from(d.precision()))
+                {
+                    return Err(PlanShapeError::InvalidLiteral);
+                }
+                self.add(FIELD * 5 + 16)
+            }
             Scalar::Null(ty) => self.data_type(ty, depth + 1),
             Scalar::Struct(s) => {
                 self.add(FIELD)?;
                 for field in s.fields() {
                     self.field(field, depth + 1)?;
                 }
-                for value in s.values() {
-                    self.scalar(value, depth + 1)?;
+                if self.literals && s.fields().len() != s.values().len() {
+                    return Err(PlanShapeError::InvalidLiteral);
+                }
+                if self.literals {
+                    for (index, field) in s.fields().iter().enumerate() {
+                        for previous in &s.fields()[..index] {
+                            if self.same_string(field.name(), previous.name())? {
+                                return Err(PlanShapeError::InvalidLiteral);
+                            }
+                        }
+                    }
+                }
+                for (index, value) in s.values().iter().enumerate() {
+                    let expected = if self.literals {
+                        s.fields().get(index)
+                    } else {
+                        None
+                    };
+                    self.scalar_as(value, depth + 1, expected)?;
                 }
                 Ok(())
             }
@@ -461,7 +588,14 @@ impl Walk<'_> {
                 self.add(FIELD)?;
                 self.array_type(a.array_type(), depth + 1)?;
                 for value in a.array_elements() {
-                    self.scalar(value, depth + 1)?;
+                    self.scalar_typed(
+                        value,
+                        depth + 1,
+                        Some((
+                            a.array_type().element_type(),
+                            a.array_type().contains_null(),
+                        )),
+                    )?;
                 }
                 Ok(())
             }
@@ -470,8 +604,15 @@ impl Walk<'_> {
                 self.map_type(m.map_type(), depth + 1)?;
                 for (key, value) in m.pairs() {
                     self.add(FIELD)?;
-                    self.scalar(key, depth + 1)?;
-                    self.scalar(value, depth + 1)?;
+                    self.scalar_typed(key, depth + 1, Some((m.map_type().key_type(), false)))?;
+                    self.scalar_typed(
+                        value,
+                        depth + 1,
+                        Some((
+                            m.map_type().value_type(),
+                            m.map_type().value_contains_null(),
+                        )),
+                    )?;
                 }
                 Ok(())
             }
@@ -487,6 +628,252 @@ impl Walk<'_> {
             | Scalar::Date(_)
             | Scalar::IntervalYearMonth(_)
             | Scalar::IntervalDayTime(_) => self.add(FIELD),
+        }
+    }
+
+    fn literal_field<'b>(
+        &mut self,
+        schema: &'b StructType,
+        name: &str,
+    ) -> Result<Option<&'b StructField>, PlanShapeError> {
+        // ponytail: metered linear lookup; use an admitted index if wide literal sources need it.
+        for field in schema.fields() {
+            if self.same_string(name, field.name())? {
+                return Ok(Some(field));
+            }
+        }
+        Ok(None)
+    }
+
+    fn decimal_type(&self, ty: &crate::schema::DecimalType) -> Result<(), PlanShapeError> {
+        if self.literals
+            && (ty.precision() == 0 || ty.precision() > 38 || ty.scale() > ty.precision())
+        {
+            return Err(PlanShapeError::InvalidLiteral);
+        }
+        Ok(())
+    }
+
+    fn comparison(&mut self, depth: usize) -> Result<(), PlanShapeError> {
+        let limit = self.limits.limit(Resource::SchemaDepth).min(MAX_NESTING);
+        if depth > limit {
+            return Err(PlanShapeError::ResourceExhausted(ResourceExhausted {
+                resource: Resource::SchemaDepth,
+                limit,
+                observed: depth,
+            }));
+        }
+        self.work(1)
+    }
+
+    fn same_string(&mut self, left: &str, right: &str) -> Result<bool, PlanShapeError> {
+        self.work(1)?;
+        self.work(left.len())?;
+        self.work(right.len())?;
+        Ok(left == right)
+    }
+
+    fn scalar_type_matches(
+        &mut self,
+        scalar: &Scalar,
+        ty: &DataType,
+        depth: usize,
+    ) -> Result<bool, PlanShapeError> {
+        self.comparison(depth)?;
+        let primitive = match scalar {
+            Scalar::Integer(_) => DataType::INTEGER,
+            Scalar::Long(_) => DataType::LONG,
+            Scalar::Short(_) => DataType::SHORT,
+            Scalar::Byte(_) => DataType::BYTE,
+            Scalar::Float(_) => DataType::FLOAT,
+            Scalar::Double(_) => DataType::DOUBLE,
+            Scalar::String(_) => DataType::STRING,
+            Scalar::Boolean(_) => DataType::BOOLEAN,
+            Scalar::Timestamp(_) => DataType::TIMESTAMP,
+            Scalar::TimestampNtz(_) => DataType::TIMESTAMP_NTZ,
+            Scalar::IntervalYearMonth(_) => DataType::INTERVAL_YEAR_MONTH,
+            Scalar::IntervalDayTime(_) => DataType::INTERVAL_DAY_TIME,
+            Scalar::Date(_) => DataType::DATE,
+            Scalar::Binary(_) => DataType::BINARY,
+            Scalar::Decimal(d) => DataType::from(*d.ty()),
+            Scalar::Null(actual) => return self.same_type(actual, ty, depth),
+            Scalar::Struct(s) => {
+                let DataType::Struct(expected) = ty else {
+                    return Ok(false);
+                };
+                if s.fields().len() != expected.fields().len() {
+                    return Ok(false);
+                }
+                for (actual, expected) in s.fields().iter().zip(expected.fields()) {
+                    if !self.same_field(actual, expected, depth + 1)? {
+                        return Ok(false);
+                    }
+                }
+                return Ok(true);
+            }
+            Scalar::Array(a) => {
+                return match ty {
+                    DataType::Array(expected) => self.same_array(a.array_type(), expected, depth),
+                    _ => Ok(false),
+                }
+            }
+            Scalar::Map(m) => {
+                return match ty {
+                    DataType::Map(expected) => self.same_map(m.map_type(), expected, depth),
+                    _ => Ok(false),
+                }
+            }
+        };
+        // The scalar branch constructs only an inline primitive type, never a container.
+        Ok(&primitive == ty)
+    }
+
+    fn same_type(
+        &mut self,
+        left: &DataType,
+        right: &DataType,
+        depth: usize,
+    ) -> Result<bool, PlanShapeError> {
+        self.comparison(depth)?;
+        match (left, right) {
+            (DataType::Primitive(a), DataType::Primitive(b)) => {
+                #[cfg(feature = "geo-type-in-dev")]
+                match (a, b) {
+                    (PrimitiveType::Geometry(a), PrimitiveType::Geometry(b)) => {
+                        return self.same_string(a.crs(), b.crs());
+                    }
+                    (PrimitiveType::Geography(a), PrimitiveType::Geography(b)) => {
+                        self.work(a.crs().len())?;
+                        self.work(b.crs().len())?;
+                    }
+                    _ => (),
+                }
+                Ok(a == b)
+            }
+            (DataType::Array(a), DataType::Array(b)) => self.same_array(a, b, depth),
+            (DataType::Map(a), DataType::Map(b)) => self.same_map(a, b, depth),
+            (DataType::Struct(a), DataType::Struct(b))
+            | (DataType::Variant(a), DataType::Variant(b)) => {
+                if a.fields().len() != b.fields().len() {
+                    return Ok(false);
+                }
+                for (a, b) in a.fields().zip(b.fields()) {
+                    if !self.same_field(a, b, depth + 1)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn same_array(
+        &mut self,
+        a: &ArrayType,
+        b: &ArrayType,
+        depth: usize,
+    ) -> Result<bool, PlanShapeError> {
+        self.comparison(depth)?;
+        Ok(self.same_string(&a.type_name, &b.type_name)?
+            && a.contains_null() == b.contains_null()
+            && self.same_type(a.element_type(), b.element_type(), depth + 1)?)
+    }
+
+    fn same_map(&mut self, a: &MapType, b: &MapType, depth: usize) -> Result<bool, PlanShapeError> {
+        self.comparison(depth)?;
+        Ok(self.same_string(&a.type_name, &b.type_name)?
+            && a.value_contains_null() == b.value_contains_null()
+            && self.same_type(a.key_type(), b.key_type(), depth + 1)?
+            && self.same_type(a.value_type(), b.value_type(), depth + 1)?)
+    }
+
+    fn same_field(
+        &mut self,
+        a: &StructField,
+        b: &StructField,
+        depth: usize,
+    ) -> Result<bool, PlanShapeError> {
+        self.comparison(depth)?;
+        if !self.same_string(a.name(), b.name())?
+            || a.is_nullable() != b.is_nullable()
+            || !self.same_type(a.data_type(), b.data_type(), depth)?
+            || a.metadata.len() != b.metadata.len()
+        {
+            return Ok(false);
+        }
+        self.work(a.metadata.capacity())?;
+        for (name, value) in &a.metadata {
+            // Charge sparse bucket scans before iteration; compare key bytes through the meter.
+            self.work(b.metadata.capacity())?;
+            let mut other = None;
+            for (candidate, value) in &b.metadata {
+                if self.same_string(name, candidate)? {
+                    other = Some(value);
+                    break;
+                }
+            }
+            let Some(other) = other else { return Ok(false) };
+            let equal = match (value, other) {
+                (MetadataValue::String(a), MetadataValue::String(b)) => self.same_string(a, b)?,
+                (MetadataValue::Other(a), MetadataValue::Other(b)) => {
+                    self.same_json(a, b, depth + 1)?
+                }
+                (MetadataValue::Number(a), MetadataValue::Number(b)) => a == b,
+                (MetadataValue::Boolean(a), MetadataValue::Boolean(b)) => a == b,
+                _ => false,
+            };
+            if !equal {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn same_json(
+        &mut self,
+        a: &serde_json::Value,
+        b: &serde_json::Value,
+        depth: usize,
+    ) -> Result<bool, PlanShapeError> {
+        self.comparison(depth)?;
+        match (a, b) {
+            (Value::String(a), Value::String(b)) => self.same_string(a, b),
+            (Value::Array(a), Value::Array(b)) => {
+                if a.len() != b.len() {
+                    return Ok(false);
+                }
+                for (a, b) in a.iter().zip(b) {
+                    if !self.same_json(a, b, depth + 1)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            (Value::Object(a), Value::Object(b)) => {
+                if a.len() != b.len() {
+                    return Ok(false);
+                }
+                for (key, value) in a {
+                    self.work(b.len())?;
+                    let mut other = None;
+                    for (candidate, value) in b {
+                        if self.same_string(key, candidate)? {
+                            other = Some(value);
+                            break;
+                        }
+                    }
+                    let Some(other) = other else { return Ok(false) };
+                    if !self.same_json(value, other, depth + 1)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            (Value::Null, Value::Null) => Ok(true),
+            (Value::Bool(a), Value::Bool(b)) => Ok(a == b),
+            (Value::Number(a), Value::Number(b)) => Ok(a == b),
+            _ => Ok(false),
         }
     }
 
@@ -668,6 +1055,7 @@ mod tests {
             encoded: usize::MAX,
             work: usize::MAX,
             schema_nodes: usize::MAX,
+            literals: false,
         };
         for (resource, result) in [
             (Resource::PlanEncodedBytes, walk.add(1)),

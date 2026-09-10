@@ -704,3 +704,456 @@ fn plan_shape_rejects_nested_opaque_predicates_without_calling_them() {
     }
     assert_eq!(Arc::strong_count(&op), 1);
 }
+
+fn check_literal_plan(
+    plan: &delta_kernel::plans::ir::plan::Plan,
+    limits: &delta_kernel::tasks::TaskLimits,
+) -> Result<delta_kernel::tasks::PlanShape, delta_kernel::tasks::PlanShapeError> {
+    let mut scratch = [0; 4096];
+    ALLOCATIONS.with(|count| count.set(Some(0)));
+    let result = delta_kernel::tasks::PlanShape::check_literals(plan, limits, &mut scratch);
+    let allocations = ALLOCATIONS.with(|count| count.replace(None).unwrap());
+    assert_eq!(allocations, 0, "literal preflight must not allocate");
+    result
+}
+
+#[test]
+fn literal_preflight_rejects_values_width_type_and_nullability_mismatches() {
+    use delta_kernel::expressions::Scalar;
+    use delta_kernel::plans::ir::nodes::Values;
+    use delta_kernel::plans::ir::plan::{Plan, PlanNode};
+    use delta_kernel::tasks::{PlanShapeError, TaskLimits};
+
+    let schema =
+        Arc::new(StructType::try_new([StructField::not_null("x", DataType::LONG)]).unwrap());
+    for row in [
+        vec![],
+        vec![Scalar::Long(1), Scalar::Long(2)],
+        vec![Scalar::Integer(1)],
+        vec![Scalar::Null(DataType::LONG)],
+    ] {
+        let plan = Plan {
+            nodes: vec![PlanNode::new(
+                Values::new(Arc::clone(&schema), vec![row]),
+                vec![],
+            )],
+        };
+        // Structural measurement remains independent of literal compatibility.
+        check_plan_shape(&plan, &TaskLimits::qualification()).unwrap();
+        assert_eq!(
+            check_literal_plan(&plan, &TaskLimits::qualification()),
+            Err(PlanShapeError::InvalidLiteral)
+        );
+    }
+    let plan = Plan {
+        nodes: vec![PlanNode::new(
+            Values::new(schema, vec![vec![Scalar::Long(1)]]),
+            vec![],
+        )],
+    };
+    check_literal_plan(&plan, &TaskLimits::qualification()).unwrap();
+}
+
+#[test]
+fn literal_preflight_rejects_deserialized_container_invariant_violations() {
+    use delta_kernel::expressions::{ArrayData, Expression, MapData, Scalar, StructData};
+    use delta_kernel::schema::{ArrayType, MapType};
+    use delta_kernel::tasks::{PlanShapeError, TaskLimits};
+
+    let array = Scalar::Array(
+        ArrayData::try_new(ArrayType::new(DataType::LONG, false), [Scalar::Long(1)]).unwrap(),
+    );
+    let map = Scalar::Map(
+        MapData::try_new(
+            MapType::new(DataType::STRING, DataType::LONG, false),
+            [(Scalar::String("k".into()), Scalar::Long(1))],
+        )
+        .unwrap(),
+    );
+    let structure = Scalar::Struct(
+        StructData::try_new(
+            vec![StructField::not_null("x", DataType::LONG)],
+            vec![Scalar::Long(1)],
+        )
+        .unwrap(),
+    );
+    let mut malformed = Vec::new();
+    for replacement in [Scalar::Integer(1), Scalar::Null(DataType::LONG)] {
+        let mut json = serde_json::to_value(&array).unwrap();
+        json["Array"]["elements"][0] = serde_json::to_value(&replacement).unwrap();
+        malformed.push(json);
+        let mut json = serde_json::to_value(&structure).unwrap();
+        json["Struct"]["values"][0] = serde_json::to_value(&replacement).unwrap();
+        malformed.push(json);
+        let mut json = serde_json::to_value(&map).unwrap();
+        json["Map"]["pairs"][0][1] = serde_json::to_value(&replacement).unwrap();
+        malformed.push(json);
+    }
+    let mut json = serde_json::to_value(&map).unwrap();
+    json["Map"]["pairs"][0][0] = serde_json::to_value(Scalar::Null(DataType::STRING)).unwrap();
+    malformed.push(json);
+    let mut json = serde_json::to_value(&structure).unwrap();
+    json["Struct"]["values"] = serde_json::json!([]);
+    malformed.push(json);
+    for json in malformed {
+        let value: Scalar = serde_json::from_value(json).unwrap();
+        let plan = expression_plan(Expression::Literal(value));
+        assert_eq!(
+            check_literal_plan(&plan, &TaskLimits::qualification()),
+            Err(PlanShapeError::InvalidLiteral)
+        );
+    }
+}
+
+#[test]
+fn literal_preflight_rejects_deserialized_decimal_precision_and_scale() {
+    use delta_kernel::expressions::{Expression, Scalar};
+    use delta_kernel::tasks::{PlanShapeError, TaskLimits};
+
+    let valid = Scalar::decimal(999, 3, 0).unwrap();
+    for (precision, scale, bits) in [
+        (0, 0, 0),
+        (39, 0, 0),
+        (3, 4, 1),
+        (3, 0, 1000),
+        (38, 0, i128::MIN),
+    ] {
+        let mut json = serde_json::to_value(&valid).unwrap();
+        json["Decimal"]["ty"]["precision"] = precision.into();
+        json["Decimal"]["ty"]["scale"] = scale.into();
+        // serde_json cannot represent all i128 values through Value; mutate serialized text.
+        let text = serde_json::to_string(&json)
+            .unwrap()
+            .replace("999", &bits.to_string());
+        let value: Scalar = serde_json::from_str(&text).unwrap();
+        let plan = expression_plan(Expression::Literal(value));
+        assert_eq!(
+            check_literal_plan(&plan, &TaskLimits::qualification()),
+            Err(PlanShapeError::InvalidLiteral)
+        );
+    }
+    check_literal_plan(
+        &expression_plan(Expression::Literal(valid)),
+        &TaskLimits::qualification(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn literal_preflight_checks_scan_constant_names_width_types_and_metadata() {
+    use delta_kernel::expressions::Scalar;
+    use delta_kernel::plans::ir::nodes::{ScanFile, ScanJson, ScanParquet};
+    use delta_kernel::plans::ir::plan::{Plan, PlanNode};
+    use delta_kernel::schema::MetadataColumnSpec;
+    use delta_kernel::tasks::{PlanShapeError, TaskLimits};
+
+    let schema = Arc::new(
+        StructType::try_new([
+            StructField::not_null("x", DataType::LONG),
+            StructField::create_metadata_column("row_index", MetadataColumnSpec::RowIndex),
+        ])
+        .unwrap(),
+    );
+    for parquet in [false, true] {
+        for (names, values, valid) in [
+            (vec!["x"], vec![Scalar::Long(1)], true),
+            (vec!["x"], vec![], false),
+            (vec!["missing"], vec![Scalar::Long(1)], false),
+            (
+                vec!["x", "x"],
+                vec![Scalar::Long(1), Scalar::Long(2)],
+                false,
+            ),
+            (vec!["row_index"], vec![Scalar::Long(1)], false),
+            (vec!["x"], vec![Scalar::Integer(1)], false),
+            (vec!["x"], vec![Scalar::Null(DataType::LONG)], false),
+        ] {
+            let files = vec![ScanFile {
+                meta: FileMeta {
+                    location: "memory:///file".parse().unwrap(),
+                    size: 1,
+                    last_modified: 0,
+                },
+                file_constants: values,
+            }];
+            let file_constant_columns = names.into_iter().map(str::to_string).collect();
+            let node = if parquet {
+                PlanNode::new(
+                    ScanParquet {
+                        files,
+                        file_constant_columns,
+                        schema: Arc::clone(&schema),
+                    },
+                    vec![],
+                )
+            } else {
+                PlanNode::new(
+                    ScanJson {
+                        files,
+                        file_constant_columns,
+                        schema: Arc::clone(&schema),
+                    },
+                    vec![],
+                )
+            };
+            let result =
+                check_literal_plan(&Plan { nodes: vec![node] }, &TaskLimits::qualification());
+            if valid {
+                result.unwrap();
+            } else {
+                assert_eq!(result, Err(PlanShapeError::InvalidLiteral));
+            }
+        }
+    }
+}
+
+#[test]
+fn literal_preflight_preserves_nested_field_order_and_metadata_contents() {
+    use delta_kernel::expressions::{Scalar, StructData};
+    use delta_kernel::plans::ir::nodes::Values;
+    use delta_kernel::plans::ir::plan::{Plan, PlanNode};
+    use delta_kernel::schema::{ArrayType, MetadataValue};
+    use delta_kernel::tasks::{PlanShapeError, TaskLimits};
+
+    let mut a = StructField::nullable("a", DataType::LONG);
+    a.metadata.insert(
+        "json".into(),
+        MetadataValue::Other(
+            serde_json::json!({"a": ["value", 1, true, null], "b": {"nested": "x"}}),
+        ),
+    );
+    a.metadata
+        .insert("tag".into(), MetadataValue::String("kept".into()));
+    let b = StructField::nullable("b", DataType::LONG);
+    let expected = StructType::try_new([a.clone(), b.clone()]).unwrap();
+    let outer =
+        Arc::new(StructType::try_new([StructField::nullable("s", expected.clone())]).unwrap());
+    let ordered = Scalar::Struct(
+        StructData::try_new(
+            vec![a.clone(), b.clone()],
+            vec![Scalar::Long(1), Scalar::Long(2)],
+        )
+        .unwrap(),
+    );
+    let reversed = Scalar::Struct(
+        StructData::try_new(
+            vec![b.clone(), a.clone()],
+            vec![Scalar::Long(2), Scalar::Long(1)],
+        )
+        .unwrap(),
+    );
+    let mut changed = a.clone();
+    changed
+        .metadata
+        .insert("tag".into(), MetadataValue::String("changed".into()));
+    let wrong_metadata = Scalar::Struct(
+        StructData::try_new(
+            vec![changed, b.clone()],
+            vec![Scalar::Long(1), Scalar::Long(2)],
+        )
+        .unwrap(),
+    );
+    for (value, valid) in [(ordered, true), (reversed, false), (wrong_metadata, false)] {
+        let plan = Plan {
+            nodes: vec![PlanNode::new(
+                Values::new(Arc::clone(&outer), vec![vec![value]]),
+                vec![],
+            )],
+        };
+        let result = check_literal_plan(&plan, &TaskLimits::qualification());
+        if valid {
+            result.unwrap();
+        } else {
+            assert_eq!(result, Err(PlanShapeError::InvalidLiteral));
+        }
+    }
+    // A typed null must obey nested ordering even inside an array descriptor.
+    let expected = DataType::from(ArrayType::new(expected, true));
+    let reversed = DataType::from(ArrayType::new(StructType::try_new([b, a]).unwrap(), true));
+    let schema = Arc::new(StructType::try_new([StructField::nullable("a", expected)]).unwrap());
+    let plan = Plan {
+        nodes: vec![PlanNode::new(
+            Values::new(schema, vec![vec![Scalar::Null(reversed)]]),
+            vec![],
+        )],
+    };
+    assert_eq!(
+        check_literal_plan(&plan, &TaskLimits::qualification()),
+        Err(PlanShapeError::InvalidLiteral)
+    );
+}
+
+#[test]
+fn literal_preflight_checks_tags_duplicates_and_comparison_work_boundaries() {
+    use delta_kernel::expressions::{Expression, Scalar, StructData};
+    use delta_kernel::schema::{ArrayType, MapType};
+    use delta_kernel::tasks::{PlanShapeError, Resource, TaskLimits};
+
+    let mut array = ArrayType::new(DataType::LONG, true);
+    array.type_name = "not-array".into();
+    let mut map = MapType::new(DataType::STRING, DataType::LONG, true);
+    map.type_name = "not-map".into();
+    for ty in [DataType::from(array), DataType::from(map)] {
+        let plan = expression_plan(Expression::Literal(Scalar::Null(ty)));
+        assert_eq!(
+            check_literal_plan(&plan, &TaskLimits::qualification()),
+            Err(PlanShapeError::InvalidLiteral)
+        );
+    }
+    let field = StructField::nullable("same", DataType::LONG);
+    let duplicate = Scalar::Struct(
+        StructData::try_new(
+            vec![field.clone(), field],
+            vec![Scalar::Long(1), Scalar::Long(2)],
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        check_literal_plan(
+            &expression_plan(Expression::Literal(duplicate)),
+            &TaskLimits::qualification()
+        ),
+        Err(PlanShapeError::InvalidLiteral)
+    );
+
+    let literal = Scalar::Struct(
+        StructData::try_new(
+            vec![StructField::nullable("x", DataType::STRING)],
+            vec![Scalar::String("value".into())],
+        )
+        .unwrap(),
+    );
+    let plan = expression_plan(Expression::Literal(literal));
+    let limits = TaskLimits::qualification();
+    let shape = check_plan_shape(&plan, &limits).unwrap();
+    let literals = check_literal_plan(&plan, &limits).unwrap();
+    assert_eq!(
+        (shape.nodes(), shape.depth(), shape.encoded_bytes()),
+        (literals.nodes(), literals.depth(), literals.encoded_bytes())
+    );
+    assert!(literals.work_units() > shape.work_units());
+    check_literal_plan(
+        &plan,
+        &limits.with_limit(Resource::WorkUnits, literals.work_units()),
+    )
+    .unwrap();
+    assert!(
+        matches!(check_literal_plan(&plan, &limits.with_limit(Resource::WorkUnits, literals.work_units() - 1)), Err(PlanShapeError::ResourceExhausted(e)) if e.resource == Resource::WorkUnits)
+    );
+}
+
+#[test]
+fn literal_preflight_charges_sparse_metadata_lookup_separately() {
+    use delta_kernel::expressions::Scalar;
+    use delta_kernel::plans::ir::nodes::{ScanFile, ScanJson};
+    use delta_kernel::plans::ir::plan::{Plan, PlanNode};
+    use delta_kernel::tasks::TaskLimits;
+
+    let mut extra = Vec::new();
+    for reserve in [0, 8192] {
+        let mut field = StructField::nullable("x", DataType::LONG);
+        field.metadata.reserve(reserve);
+        let capacity = field.metadata.capacity();
+        let schema = Arc::new(StructType::try_new([field]).unwrap());
+        let plan = Plan {
+            nodes: vec![PlanNode::new(
+                ScanJson {
+                    schema,
+                    file_constant_columns: vec!["x".into()],
+                    files: vec![ScanFile {
+                        meta: FileMeta {
+                            location: "memory:///file".parse().unwrap(),
+                            size: 1,
+                            last_modified: 0,
+                        },
+                        file_constants: vec![Scalar::Long(1)],
+                    }],
+                },
+                vec![],
+            )],
+        };
+        let limits = TaskLimits::qualification();
+        let shape = check_plan_shape(&plan, &limits).unwrap();
+        let literals = check_literal_plan(&plan, &limits).unwrap();
+        check_literal_plan(
+            &plan,
+            &limits.with_limit(
+                delta_kernel::tasks::Resource::WorkUnits,
+                literals.work_units(),
+            ),
+        )
+        .unwrap();
+        assert!(
+            matches!(check_literal_plan(&plan, &limits.with_limit(delta_kernel::tasks::Resource::WorkUnits, literals.work_units() - 1)), Err(delta_kernel::tasks::PlanShapeError::ResourceExhausted(e)) if e.resource == delta_kernel::tasks::Resource::WorkUnits)
+        );
+        extra.push((literals.work_units() - shape.work_units(), capacity));
+    }
+    assert_eq!(extra[1].0 - extra[0].0, extra[1].1 - extra[0].1);
+}
+
+#[test]
+fn literal_preflight_meters_order_independent_nested_metadata_comparison() {
+    use delta_kernel::expressions::{Scalar, StructData};
+    use delta_kernel::plans::ir::nodes::Values;
+    use delta_kernel::plans::ir::plan::{Plan, PlanNode};
+    use delta_kernel::schema::MetadataValue;
+    use delta_kernel::tasks::{PlanShapeError, Resource, TaskLimits};
+
+    let fields: Vec<_> =
+        (0..32)
+            .map(|i| {
+                let mut field = StructField::nullable(format!("f{i}"), DataType::LONG);
+                field.metadata.insert("json".into(), MetadataValue::Other(serde_json::json!({
+            "first": [true, null, {"nested": "value", "number": 1.25}], "second": [1, 2, 3]
+        })));
+                field
+                    .metadata
+                    .insert("tag".into(), MetadataValue::String("kept".into()));
+                if i == 0 {
+                    for key in 0..64 {
+                        field
+                            .metadata
+                            .insert(format!("key{key}"), MetadataValue::Number(key));
+                    }
+                }
+                field
+            })
+            .collect();
+    let expected = StructType::try_new(fields.clone()).unwrap();
+    let actual: Vec<_> = fields
+        .iter()
+        .cloned()
+        .map(|mut field| {
+            let mut metadata = std::collections::HashMap::new();
+            for (key, value) in &field.metadata {
+                metadata.insert(key.clone(), value.clone());
+            }
+            field.metadata = metadata;
+            field
+        })
+        .collect();
+    // Verify different bucket order rather than assuming insertion order changes iteration.
+    assert!(fields[0].metadata.keys().ne(actual[0].metadata.keys()));
+    let scalar =
+        Scalar::Struct(StructData::try_new(actual, (0..32).map(Scalar::Long).collect()).unwrap());
+    let schema = Arc::new(StructType::try_new([StructField::nullable("s", expected)]).unwrap());
+    let plan = Plan {
+        nodes: vec![PlanNode::new(
+            Values::new(schema, vec![vec![scalar]]),
+            vec![],
+        )],
+    };
+    let limits = TaskLimits::qualification();
+    let shape = check_plan_shape(&plan, &limits).unwrap();
+    let literals = check_literal_plan(&plan, &limits).unwrap();
+    assert_eq!(shape.encoded_bytes(), literals.encoded_bytes());
+    assert!(literals.work_units() > shape.work_units());
+    check_literal_plan(
+        &plan,
+        &limits.with_limit(Resource::WorkUnits, literals.work_units()),
+    )
+    .unwrap();
+    assert!(
+        matches!(check_literal_plan(&plan, &limits.with_limit(Resource::WorkUnits, literals.work_units() - 1)), Err(PlanShapeError::ResourceExhausted(e)) if e.resource == Resource::WorkUnits)
+    );
+}
