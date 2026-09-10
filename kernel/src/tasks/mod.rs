@@ -7,6 +7,13 @@
 mod accounting;
 mod driver;
 mod evaluation;
+#[cfg(all(
+    feature = "default-engine-base",
+    feature = "arrow-59",
+    unix,
+    not(all(target_arch = "wasm32", target_os = "unknown"))
+))]
+mod local_io;
 mod machine;
 mod plan_admission;
 mod plan_shape;
@@ -26,6 +33,13 @@ pub use evaluation::{
     AccountedEngineData, EvaluationLimits, EvaluationPage, EvaluationPageLimits, EvaluationReader,
     EvaluationUsage,
 };
+#[cfg(all(
+    feature = "default-engine-base",
+    feature = "arrow-59",
+    unix,
+    not(all(target_arch = "wasm32", target_os = "unknown"))
+))]
+pub use local_io::LocalFileIoSource;
 pub use machine::{TaskAction, TaskMachine, TaskState, TaskStatus};
 pub use plan_admission::{AdmittedPlan, PlanAdmissionError, PlanMetadataEntry};
 pub use plan_shape::{PlanShape, PlanShapeError};

@@ -92,6 +92,9 @@ optional = true
 [target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
 uuid = { version = "1.18.0", features = ["v4", "fast-rng"] }
 
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.4", features = ["fs"], optional = true }
+
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 uuid = { version = "1.18.0", features = ["v4", "js"] }
 # Kernel's rand 0.9 uses getrandom 0.3 independently of UUID's browser backend.
@@ -153,6 +156,7 @@ geo-type-in-dev = []
 default-engine-base = [
   "arrow-engine-data",
   "arrow-expression",
+  "dep:rustix",
   "need-arrow",
   "reqwest",
 ]

@@ -1356,6 +1356,7 @@ dependencies = [
  "rstest",
  "rstest_reuse",
  "rustc_version",
+ "rustix",
  "serde",
  "serde_json",
  "strum 0.28.0",
