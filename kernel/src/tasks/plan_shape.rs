@@ -1,15 +1,11 @@
 use std::error::Error;
 use std::fmt::{self, Write};
 
-use serde_json::Value;
-
 use super::{Resource, ResourceExhausted, TaskLimits};
 use crate::expressions::{ColumnName, Expression, Predicate, Scalar};
 use crate::plans::ir::nodes::{Agg, Operator, ScanFile};
 use crate::plans::ir::plan::Plan;
-use crate::schema::{
-    ArrayType, DataType, MapType, MetadataValue, PrimitiveType, StructField, StructType,
-};
+use crate::schema::{ArrayType, DataType, MapType, PrimitiveType, StructField, StructType};
 
 // The largest field number in the plan wire grammar is 19 (two tag bytes). A protobuf
 // varint or length prefix uses at most ten bytes. Charging both also bounds fixed-width fields.
@@ -23,8 +19,9 @@ const MAX_NESTING: usize = 64;
 /// traversal of the retained IR, rejects opaque/unknown expressions, and bounds the protobuf
 /// representation. This size bound does not assert a lossless wire round-trip (the current
 /// protobuf conversion omits the child of a cast). Operator type compatibility and canonical
-/// allocation ownership are separate requirements. The encoded bound includes the
-/// `Operation::QueryPlan` envelope.
+/// allocation ownership are separate requirements. Nonempty public metadata and struct-patch
+/// hash maps are rejected before traversal: their reported capacity is not a backing bound. The
+/// encoded bound includes the `Operation::QueryPlan` envelope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlanShape {
     nodes: usize,
@@ -60,7 +57,8 @@ impl PlanShape {
     ///
     /// Uses the same caller-owned `scratch` and resource limits as [`Self::check`]. Also checks
     /// Values row widths, scan constants, scalar container types/nullability, decimal ranges and
-    /// array/map type tags. Struct literals must match declared field order and metadata.
+    /// array/map type tags. Struct literals must match declared field order. Nonempty metadata
+    /// and field-patch hash maps return [`PlanShapeError::UnadmittedMap`] before traversal.
     /// Comparisons consume work units before inspecting their inputs.
     ///
     /// This is still a measurement, not an admitted plan. General operator/expression typing,
@@ -93,11 +91,11 @@ impl PlanShape {
         self.encoded_bytes
     }
 
-    /// Traversal work, including input edges, formatting writes and sparse hash-table capacity
-    /// scans.
+    /// Traversal work, including input edges, formatting writes and admitted comparisons.
     pub fn work_units(&self) -> usize {
         self.work_units
     }
+
     fn check_inner(
         plan: &Plan,
         limits: &TaskLimits,
@@ -187,6 +185,8 @@ pub enum PlanShapeError {
     UnsupportedExpression,
     /// A literal payload, declared type, Values row or scan constant is incompatible.
     InvalidLiteral,
+    /// A nonempty public hash map has no producer-proven traversal bound.
+    UnadmittedMap,
     /// A checked resource allowance or the nesting ceiling was exceeded.
     ResourceExhausted(ResourceExhausted),
     /// The caller-provided workspace cannot hold the topology depths.
@@ -204,6 +204,7 @@ impl fmt::Display for PlanShapeError {
             Self::InvalidInput { node } => write!(f, "invalid input index at plan node {node}"),
             Self::UnsupportedExpression => f.write_str("unsupported task expression"),
             Self::InvalidLiteral => f.write_str("invalid task literal"),
+            Self::UnadmittedMap => f.write_str("task map requires producer admission"),
             Self::ResourceExhausted(error) => error.fmt(f),
             Self::ScratchTooSmall { required } => {
                 write!(f, "plan scratch requires {required} entries")
@@ -390,13 +391,8 @@ impl Walk<'_> {
                         return Err(PlanShapeError::InvalidLiteral);
                     }
                 }
-                let field = self
-                    .literal_field(schema, name)?
+                self.literal_field(schema, name)?
                     .ok_or(PlanShapeError::InvalidLiteral)?;
-                self.work(field.metadata.capacity())?;
-                if field.is_metadata_column() {
-                    return Err(PlanShapeError::InvalidLiteral);
-                }
             }
         }
         for file in files {
@@ -429,24 +425,14 @@ impl Walk<'_> {
 
     fn field(&mut self, field: &StructField, depth: usize) -> Result<(), PlanShapeError> {
         self.schema_enter(depth)?;
+        // Reported HashMap capacity can shrink after deletion without releasing its buckets.
+        // Even iteration or an absent-key lookup needs a bound minted by the producer.
+        if !field.metadata.is_empty() {
+            return Err(PlanShapeError::UnadmittedMap);
+        }
         self.string(&field.name)?;
         self.data_type(&field.data_type, depth)?;
-        self.add(FIELD)?; // nullable
-                          // HashMap iteration scans empty buckets too. Reject excessive source capacity before it.
-        self.work(field.metadata.capacity())?;
-        for (key, value) in &field.metadata {
-            self.add(FIELD * 2)?; // map entry and MetadataValue message
-            self.string(key)?;
-            match value {
-                MetadataValue::Number(_) | MetadataValue::Boolean(_) => self.add(FIELD)?,
-                MetadataValue::String(s) => self.string(s)?,
-                MetadataValue::Other(json) => {
-                    self.add(FIELD)?;
-                    self.json(json, depth + 1)?;
-                }
-            }
-        }
-        Ok(())
+        self.add(FIELD) // nullable
     }
 
     fn data_type(&mut self, ty: &DataType, depth: usize) -> Result<(), PlanShapeError> {
@@ -795,86 +781,12 @@ impl Walk<'_> {
         depth: usize,
     ) -> Result<bool, PlanShapeError> {
         self.comparison(depth)?;
-        if !self.same_string(a.name(), b.name())?
-            || a.is_nullable() != b.is_nullable()
-            || !self.same_type(a.data_type(), b.data_type(), depth)?
-            || a.metadata.len() != b.metadata.len()
-        {
-            return Ok(false);
+        if !a.metadata.is_empty() || !b.metadata.is_empty() {
+            return Err(PlanShapeError::UnadmittedMap);
         }
-        self.work(a.metadata.capacity())?;
-        for (name, value) in &a.metadata {
-            // Charge sparse bucket scans before iteration; compare key bytes through the meter.
-            self.work(b.metadata.capacity())?;
-            let mut other = None;
-            for (candidate, value) in &b.metadata {
-                if self.same_string(name, candidate)? {
-                    other = Some(value);
-                    break;
-                }
-            }
-            let Some(other) = other else { return Ok(false) };
-            let equal = match (value, other) {
-                (MetadataValue::String(a), MetadataValue::String(b)) => self.same_string(a, b)?,
-                (MetadataValue::Other(a), MetadataValue::Other(b)) => {
-                    self.same_json(a, b, depth + 1)?
-                }
-                (MetadataValue::Number(a), MetadataValue::Number(b)) => a == b,
-                (MetadataValue::Boolean(a), MetadataValue::Boolean(b)) => a == b,
-                _ => false,
-            };
-            if !equal {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-
-    fn same_json(
-        &mut self,
-        a: &serde_json::Value,
-        b: &serde_json::Value,
-        depth: usize,
-    ) -> Result<bool, PlanShapeError> {
-        self.comparison(depth)?;
-        match (a, b) {
-            (Value::String(a), Value::String(b)) => self.same_string(a, b),
-            (Value::Array(a), Value::Array(b)) => {
-                if a.len() != b.len() {
-                    return Ok(false);
-                }
-                for (a, b) in a.iter().zip(b) {
-                    if !self.same_json(a, b, depth + 1)? {
-                        return Ok(false);
-                    }
-                }
-                Ok(true)
-            }
-            (Value::Object(a), Value::Object(b)) => {
-                if a.len() != b.len() {
-                    return Ok(false);
-                }
-                for (key, value) in a {
-                    self.work(b.len())?;
-                    let mut other = None;
-                    for (candidate, value) in b {
-                        if self.same_string(key, candidate)? {
-                            other = Some(value);
-                            break;
-                        }
-                    }
-                    let Some(other) = other else { return Ok(false) };
-                    if !self.same_json(value, other, depth + 1)? {
-                        return Ok(false);
-                    }
-                }
-                Ok(true)
-            }
-            (Value::Null, Value::Null) => Ok(true),
-            (Value::Bool(a), Value::Bool(b)) => Ok(a == b),
-            (Value::Number(a), Value::Number(b)) => Ok(a == b),
-            _ => Ok(false),
-        }
+        Ok(self.same_string(a.name(), b.name())?
+            && a.is_nullable() == b.is_nullable()
+            && self.same_type(a.data_type(), b.data_type(), depth)?)
     }
 
     fn expression(&mut self, expr: &Expression, depth: usize) -> Result<(), PlanShapeError> {
@@ -897,17 +809,12 @@ impl Walk<'_> {
                 Ok(())
             }
             Expression::StructPatch(patch) => {
+                if !patch.field_patches.is_empty() {
+                    return Err(PlanShapeError::UnadmittedMap);
+                }
                 self.add(FIELD)?;
                 if let Some(path) = &patch.input_path {
                     self.column(path)?;
-                }
-                self.work(patch.field_patches.capacity())?;
-                for (name, patch) in &patch.field_patches {
-                    self.add(FIELD * 4)?; // map entry, FieldTransform, and its boolean fields
-                    self.string(name)?;
-                    for expr in &patch.insertions {
-                        self.expression(expr, depth + 1)?;
-                    }
                 }
                 for expr in patch.prepended_fields.iter().chain(&patch.appended_fields) {
                     self.expression(expr, depth + 1)?;
@@ -975,38 +882,6 @@ impl Walk<'_> {
                 Ok(())
             }
         }
-    }
-
-    fn json(&mut self, json: &serde_json::Value, depth: usize) -> Result<(), PlanShapeError> {
-        self.enter(depth)?; // also conservatively covers container delimiters and commas
-        match json {
-            serde_json::Value::Null | serde_json::Value::Bool(_) => self.add(5),
-            serde_json::Value::Number(n) => self.formatted(format_args!("{n}")),
-            serde_json::Value::String(s) => self.json_string(s),
-            serde_json::Value::Array(a) => {
-                for value in a {
-                    self.json(value, depth + 1)?;
-                }
-                Ok(())
-            }
-            serde_json::Value::Object(o) => {
-                for (key, value) in o {
-                    self.json_string(key)?;
-                    self.json(value, depth + 1)?;
-                }
-                Ok(())
-            }
-        }
-    }
-
-    fn json_string(&mut self, s: &str) -> Result<(), PlanShapeError> {
-        // Each input byte needs at most six output bytes (a JSON \u00XX escape), plus quotes.
-        let escaped = s
-            .len()
-            .checked_mul(6)
-            .ok_or_else(|| self.exhausted(Resource::PlanEncodedBytes))?;
-        self.add(2)?;
-        self.add(escaped)
     }
 
     fn formatted(&mut self, args: fmt::Arguments<'_>) -> Result<(), PlanShapeError> {

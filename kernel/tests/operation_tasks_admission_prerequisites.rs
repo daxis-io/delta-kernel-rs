@@ -217,7 +217,7 @@ fn expression_plan(
 }
 
 #[test]
-fn plan_shape_bounds_nested_scalars_schemas_metadata_and_all_operators() {
+fn plan_shape_handles_nested_scalars_schemas_and_all_operators() {
     use delta_kernel::expressions::{ArrayData, DecimalData, MapData, Scalar, StructData};
     use delta_kernel::plans::ir::nodes::{
         Agg, Aggregate, Filter, NonNullByOperands, ScanFile, ScanJson, ScanParquet, SemiJoin,
@@ -226,7 +226,7 @@ fn plan_shape_bounds_nested_scalars_schemas_metadata_and_all_operators() {
     use delta_kernel::plans::ir::plan::{Plan, PlanNode};
     use delta_kernel::schema::{ArrayType, DecimalType, MapType, MetadataValue};
 
-    let field = StructField::nullable("text\0\n雪", DataType::STRING).with_metadata([
+    let mut field = StructField::nullable("text\0\n雪", DataType::STRING).with_metadata([
         ("number", MetadataValue::Number(i64::MIN)),
         ("string", MetadataValue::String("x".repeat(1 << 16))),
         ("bool", MetadataValue::Boolean(false)),
@@ -237,6 +237,16 @@ fn plan_shape_bounds_nested_scalars_schemas_metadata_and_all_operators() {
             ),
         ),
     ]);
+    assert_unadmitted_map(&Plan {
+        nodes: vec![PlanNode::new(
+            Values::new(
+                Arc::new(StructType::try_new([field.clone()]).unwrap()),
+                vec![],
+            ),
+            vec![],
+        )],
+    });
+    field.metadata.clear();
     let nested = StructType::try_new([field.clone()]).unwrap();
     let values = vec![
         Scalar::Integer(i32::MIN),
@@ -428,21 +438,27 @@ fn expression_wrappers(
 #[test]
 fn plan_shape_walks_all_expression_positions_and_rejects_nested_unknowns() {
     use delta_kernel::expressions::{Expression, Predicate};
-    use delta_kernel::tasks::{PlanShapeError, TaskLimits};
+    use delta_kernel::tasks::TaskLimits;
 
     for expr in expression_wrappers(Expression::Column(ColumnName::new(["field", "nested"]))) {
-        assert_plan_shape_bound(expression_plan(expr));
+        let plan = expression_plan(expr.clone());
+        if expression_has_unadmitted_patch(&expr) {
+            assert_unadmitted_map(&plan);
+        } else {
+            assert_plan_shape_bound(plan);
+        }
     }
     for unknown in [
         Expression::Unknown("hidden".into()),
         Expression::Predicate(Box::new(Predicate::Unknown("hidden".into()))),
     ] {
         for expr in expression_wrappers(unknown) {
+            let expected = expression_rejection(&expr);
             let plan = expression_plan(expr);
             ALLOCATIONS.with(|count| count.set(Some(0)));
             let result = check_plan_shape(&plan, &TaskLimits::qualification());
             let allocations = ALLOCATIONS.with(|count| count.replace(None).unwrap());
-            assert_eq!(result, Err(PlanShapeError::UnsupportedExpression));
+            assert_eq!(result, Err(expected));
             assert_eq!(
                 allocations, 0,
                 "failed borrowed preflight does not allocate"
@@ -490,9 +506,10 @@ fn plan_shape_rejects_each_resource_boundary_without_unbounded_scratch() {
         .field_patches
         .insert("x".into(), ExpressionFieldPatch::default());
     let sparse = expression_plan(Expression::StructPatch(patch));
-    assert!(
-        matches!(check_plan_shape(&sparse, &limits.with_limit(Resource::WorkUnits, 100)), Err(PlanShapeError::ResourceExhausted(e)) if e.resource == Resource::WorkUnits)
-    );
+    assert!(matches!(
+        check_plan_shape(&sparse, &limits.with_limit(Resource::WorkUnits, 100)),
+        Err(PlanShapeError::UnadmittedMap)
+    ));
 }
 
 #[derive(Debug, PartialEq)]
@@ -514,7 +531,7 @@ impl delta_kernel::expressions::OpaqueExpressionOp for NeverInvoke {
 #[test]
 fn plan_shape_rejects_opaque_callbacks_without_invoking_or_retaining_them() {
     use delta_kernel::expressions::{Expression, OpaqueExpression};
-    use delta_kernel::tasks::{PlanShapeError, TaskLimits};
+    use delta_kernel::tasks::TaskLimits;
 
     let op = Arc::new(NeverInvoke);
     let expr = Expression::Opaque(OpaqueExpression {
@@ -522,11 +539,12 @@ fn plan_shape_rejects_opaque_callbacks_without_invoking_or_retaining_them() {
         exprs: vec![],
     });
     for expr in expression_wrappers(expr) {
+        let expected = expression_rejection(&expr);
         let plan = expression_plan(expr);
         let before = Arc::strong_count(&op);
         assert_eq!(
             check_plan_shape(&plan, &TaskLimits::qualification()),
-            Err(PlanShapeError::UnsupportedExpression)
+            Err(expected)
         );
         assert_eq!(Arc::strong_count(&op), before);
     }
@@ -621,7 +639,7 @@ fn plan_shape_bounds_repeated_decimal_and_escaping_heavy_metadata() {
             .with_metadata([("control", MetadataValue::Other(metadata))])])
         .unwrap(),
     );
-    assert_plan_shape_bound(Plan {
+    assert_unadmitted_map(&Plan {
         nodes: vec![PlanNode::new(Values::new(schema, vec![]), vec![])],
     });
 }
@@ -690,16 +708,17 @@ impl delta_kernel::expressions::OpaquePredicateOp for NeverInvoke {
 #[test]
 fn plan_shape_rejects_nested_opaque_predicates_without_calling_them() {
     use delta_kernel::expressions::{Expression, OpaquePredicate, Predicate};
-    use delta_kernel::tasks::{PlanShapeError, TaskLimits};
+    use delta_kernel::tasks::TaskLimits;
     let op = Arc::new(NeverInvoke);
     let expr = Expression::Predicate(Box::new(Predicate::Opaque(OpaquePredicate {
         op: op.clone(),
         exprs: vec![],
     })));
     for expr in expression_wrappers(expr) {
+        let expected = expression_rejection(&expr);
         assert_eq!(
             check_plan_shape(&expression_plan(expr), &TaskLimits::qualification()),
-            Err(PlanShapeError::UnsupportedExpression)
+            Err(expected)
         );
     }
     assert_eq!(Arc::strong_count(&op), 1);
@@ -850,7 +869,7 @@ fn literal_preflight_checks_scan_constant_names_width_types_and_metadata() {
     let schema = Arc::new(
         StructType::try_new([
             StructField::not_null("x", DataType::LONG),
-            StructField::create_metadata_column("row_index", MetadataColumnSpec::RowIndex),
+            StructField::not_null("row_index", DataType::LONG),
         ])
         .unwrap(),
     );
@@ -868,6 +887,21 @@ fn literal_preflight_checks_scan_constant_names_width_types_and_metadata() {
             (vec!["x"], vec![Scalar::Integer(1)], false),
             (vec!["x"], vec![Scalar::Null(DataType::LONG)], false),
         ] {
+            let has_metadata = names.as_slice() == ["row_index"];
+            let schema = if has_metadata {
+                Arc::new(
+                    StructType::try_new([
+                        StructField::not_null("x", DataType::LONG),
+                        StructField::create_metadata_column(
+                            "row_index",
+                            MetadataColumnSpec::RowIndex,
+                        ),
+                    ])
+                    .unwrap(),
+                )
+            } else {
+                Arc::clone(&schema)
+            };
             let files = vec![ScanFile {
                 meta: FileMeta {
                     location: "memory:///file".parse().unwrap(),
@@ -901,29 +935,28 @@ fn literal_preflight_checks_scan_constant_names_width_types_and_metadata() {
             if valid {
                 result.unwrap();
             } else {
-                assert_eq!(result, Err(PlanShapeError::InvalidLiteral));
+                assert_eq!(
+                    result,
+                    Err(if has_metadata {
+                        PlanShapeError::UnadmittedMap
+                    } else {
+                        PlanShapeError::InvalidLiteral
+                    })
+                );
             }
         }
     }
 }
 
 #[test]
-fn literal_preflight_preserves_nested_field_order_and_metadata_contents() {
+fn literal_preflight_preserves_nested_field_order() {
     use delta_kernel::expressions::{Scalar, StructData};
     use delta_kernel::plans::ir::nodes::Values;
     use delta_kernel::plans::ir::plan::{Plan, PlanNode};
     use delta_kernel::schema::{ArrayType, MetadataValue};
     use delta_kernel::tasks::{PlanShapeError, TaskLimits};
 
-    let mut a = StructField::nullable("a", DataType::LONG);
-    a.metadata.insert(
-        "json".into(),
-        MetadataValue::Other(
-            serde_json::json!({"a": ["value", 1, true, null], "b": {"nested": "x"}}),
-        ),
-    );
-    a.metadata
-        .insert("tag".into(), MetadataValue::String("kept".into()));
+    let a = StructField::nullable("a", DataType::LONG);
     let b = StructField::nullable("b", DataType::LONG);
     let expected = StructType::try_new([a.clone(), b.clone()]).unwrap();
     let outer =
@@ -953,7 +986,7 @@ fn literal_preflight_preserves_nested_field_order_and_metadata_contents() {
         )
         .unwrap(),
     );
-    for (value, valid) in [(ordered, true), (reversed, false), (wrong_metadata, false)] {
+    for (value, valid) in [(ordered, true), (reversed, false)] {
         let plan = Plan {
             nodes: vec![PlanNode::new(
                 Values::new(Arc::clone(&outer), vec![vec![value]]),
@@ -967,6 +1000,12 @@ fn literal_preflight_preserves_nested_field_order_and_metadata_contents() {
             assert_eq!(result, Err(PlanShapeError::InvalidLiteral));
         }
     }
+    assert_unadmitted_map(&Plan {
+        nodes: vec![PlanNode::new(
+            Values::new(Arc::clone(&outer), vec![vec![wrong_metadata]]),
+            vec![],
+        )],
+    });
     // A typed null must obey nested ordering even inside an array descriptor.
     let expected = DataType::from(ArrayType::new(expected, true));
     let reversed = DataType::from(ArrayType::new(StructType::try_new([b, a]).unwrap(), true));
@@ -1043,7 +1082,7 @@ fn literal_preflight_checks_tags_duplicates_and_comparison_work_boundaries() {
 }
 
 #[test]
-fn literal_preflight_charges_sparse_metadata_lookup_separately() {
+fn literal_preflight_does_not_scan_empty_reserved_metadata() {
     use delta_kernel::expressions::Scalar;
     use delta_kernel::plans::ir::nodes::{ScanFile, ScanJson};
     use delta_kernel::plans::ir::plan::{Plan, PlanNode};
@@ -1088,16 +1127,16 @@ fn literal_preflight_charges_sparse_metadata_lookup_separately() {
         );
         extra.push((literals.work_units() - shape.work_units(), capacity));
     }
-    assert_eq!(extra[1].0 - extra[0].0, extra[1].1 - extra[0].1);
+    assert_eq!(extra[1].0, extra[0].0);
+    assert!(extra[1].1 > extra[0].1);
 }
 
 #[test]
-fn literal_preflight_meters_order_independent_nested_metadata_comparison() {
+fn literal_preflight_requires_producer_admission_for_nested_metadata() {
     use delta_kernel::expressions::{Scalar, StructData};
     use delta_kernel::plans::ir::nodes::Values;
     use delta_kernel::plans::ir::plan::{Plan, PlanNode};
     use delta_kernel::schema::MetadataValue;
-    use delta_kernel::tasks::{PlanShapeError, Resource, TaskLimits};
 
     let fields: Vec<_> =
         (0..32)
@@ -1143,17 +1182,195 @@ fn literal_preflight_meters_order_independent_nested_metadata_comparison() {
             vec![],
         )],
     };
-    let limits = TaskLimits::qualification();
-    let shape = check_plan_shape(&plan, &limits).unwrap();
-    let literals = check_literal_plan(&plan, &limits).unwrap();
-    assert_eq!(shape.encoded_bytes(), literals.encoded_bytes());
-    assert!(literals.work_units() > shape.work_units());
-    check_literal_plan(
-        &plan,
-        &limits.with_limit(Resource::WorkUnits, literals.work_units()),
-    )
-    .unwrap();
+    assert_unadmitted_map(&plan);
+}
+
+#[test]
+fn hash_map_capacity_after_deletion_is_not_a_backing_allocation_bound() {
+    let map = tombstone_map(delta_kernel::schema::MetadataValue::Number(1));
+    assert_eq!(map.len(), 1);
+}
+
+fn tombstone_map<V: Clone>(value: V) -> std::collections::HashMap<String, V> {
+    use std::collections::HashMap;
+    use std::hash::BuildHasher;
+    let mut map = HashMap::with_capacity(1024);
+    let original = map.capacity();
+    let mask = original.next_power_of_two() - 1;
+    let cluster = map
+        .hasher()
+        .hash_one(delta_kernel::schema::ColumnMetadataKey::MetadataSpec.as_ref())
+        as usize
+        & mask;
+    let mut keys = Vec::with_capacity(original);
+    for index in 0..20_000_000 {
+        let key = format!("collision-{index}");
+        if map.hasher().hash_one(&key) as usize & mask == cluster {
+            keys.push(key.clone());
+            map.insert(key, value.clone());
+            if keys.len() == original {
+                break;
+            }
+        }
+    }
+    assert_eq!(map.len(), original);
+    assert_eq!(map.capacity(), original);
+    ALLOCATIONS.with(|count| count.set(Some(0)));
+    for key in &keys[..keys.len() - 1] {
+        map.remove(key);
+    }
+    let allocations = ALLOCATIONS.with(|count| count.replace(None).unwrap());
+    assert_eq!(allocations, 0);
+    assert_eq!(map.len(), 1);
     assert!(
-        matches!(check_literal_plan(&plan, &limits.with_limit(Resource::WorkUnits, literals.work_units() - 1)), Err(PlanShapeError::ResourceExhausted(e)) if e.resource == Resource::WorkUnits)
+        map.capacity() < original / 4,
+        "before={original}, after={}",
+        map.capacity()
     );
+    println!(
+        "hash-map owner probe: original_capacity={original}, retained_capacity={}, live_entries={}",
+        map.capacity(),
+        map.len()
+    );
+    map
+}
+
+#[test]
+fn borrowed_plan_rejects_unadmitted_hash_maps_before_scanning() {
+    use delta_kernel::expressions::{
+        Expression, ExpressionFieldPatch, ExpressionStructPatch, Scalar,
+    };
+    use delta_kernel::plans::ir::nodes::Values;
+    use delta_kernel::plans::ir::plan::{Plan, PlanNode};
+    use delta_kernel::schema::MetadataValue;
+    use delta_kernel::tasks::{PlanShapeError, TaskLimits};
+
+    let mut field = StructField::nullable("x", DataType::LONG);
+    field
+        .metadata
+        .insert("key".into(), MetadataValue::Number(1));
+    let schema = Arc::new(StructType::try_new([field]).unwrap());
+    let metadata = Plan {
+        nodes: vec![PlanNode::new(
+            Values::new(schema, vec![vec![Scalar::Long(1)]]),
+            vec![],
+        )],
+    };
+    let patch = expression_plan(Expression::StructPatch(ExpressionStructPatch {
+        field_patches: [(
+            "x".into(),
+            ExpressionFieldPatch {
+                keep_input: true,
+                optional: false,
+                insertions: vec![],
+            },
+        )]
+        .into(),
+        ..Default::default()
+    }));
+    for plan in [metadata, patch] {
+        assert_eq!(
+            check_plan_shape(&plan, &TaskLimits::qualification()),
+            Err(PlanShapeError::UnadmittedMap)
+        );
+        assert_eq!(
+            check_literal_plan(&plan, &TaskLimits::qualification()),
+            Err(PlanShapeError::UnadmittedMap)
+        );
+    }
+}
+
+#[test]
+fn borrowed_plan_rejects_nested_unadmitted_metadata() {
+    use delta_kernel::expressions::{CastExpression, Expression, ParseJsonExpression, Scalar};
+    use delta_kernel::schema::{ArrayType, MapType, MetadataValue};
+
+    let nested = || {
+        StructType::try_new([StructField::nullable("x", DataType::LONG)
+            .with_metadata([("key", MetadataValue::Number(1))])])
+        .unwrap()
+    };
+    let expressions = [
+        Expression::Literal(Scalar::Null(DataType::from(nested()))),
+        Expression::Literal(Scalar::Null(DataType::from(ArrayType::new(nested(), true)))),
+        Expression::Literal(Scalar::Null(DataType::from(MapType::new(
+            DataType::STRING,
+            nested(),
+            true,
+        )))),
+        Expression::ParseJson(ParseJsonExpression {
+            json_expr: Box::new(delta_kernel::expressions::lit("{}")),
+            output_schema: Arc::new(nested()),
+        }),
+        Expression::Cast(CastExpression {
+            expr: Box::new(delta_kernel::expressions::lit(1)),
+            target: DataType::from(nested()),
+        }),
+    ];
+    for expression in expressions {
+        assert_unadmitted_map(&expression_plan(expression));
+    }
+}
+
+#[test]
+fn borrowed_plan_accepts_empty_maps_with_retained_backing_without_charging_it() {
+    use delta_kernel::expressions::{Expression, ExpressionStructPatch};
+
+    let mut patch = ExpressionStructPatch::default();
+    patch.field_patches.reserve(8192);
+    let plan = expression_plan(Expression::StructPatch(patch));
+    let limits = delta_kernel::tasks::TaskLimits::qualification();
+    let shape = check_plan_shape(&plan, &limits).unwrap();
+    let literal_shape = check_literal_plan(&plan, &limits).unwrap();
+    assert_eq!(shape, literal_shape);
+}
+
+fn expression_has_unadmitted_patch(expr: &delta_kernel::expressions::Expression) -> bool {
+    matches!(expr, delta_kernel::expressions::Expression::StructPatch(p) if !p.field_patches.is_empty())
+}
+
+fn expression_rejection(
+    expr: &delta_kernel::expressions::Expression,
+) -> delta_kernel::tasks::PlanShapeError {
+    if expression_has_unadmitted_patch(expr) {
+        delta_kernel::tasks::PlanShapeError::UnadmittedMap
+    } else {
+        delta_kernel::tasks::PlanShapeError::UnsupportedExpression
+    }
+}
+
+fn assert_unadmitted_map(plan: &delta_kernel::plans::ir::plan::Plan) {
+    use delta_kernel::tasks::{PlanShapeError, TaskLimits};
+    ALLOCATIONS.with(|count| count.set(Some(0)));
+    let result = check_plan_shape(plan, &TaskLimits::qualification());
+    let allocations = ALLOCATIONS.with(|count| count.replace(None).unwrap());
+    assert_eq!(result, Err(PlanShapeError::UnadmittedMap));
+    assert_eq!(allocations, 0);
+    assert_eq!(
+        check_literal_plan(plan, &TaskLimits::qualification()),
+        Err(PlanShapeError::UnadmittedMap)
+    );
+}
+
+#[test]
+fn borrowed_plan_rejects_tombstone_metadata_without_scanning_or_lookup() {
+    use delta_kernel::plans::ir::nodes::Values;
+    use delta_kernel::plans::ir::plan::{Plan, PlanNode};
+    let mut field = StructField::nullable("x", DataType::LONG);
+    field.metadata = tombstone_map(delta_kernel::schema::MetadataValue::Number(1));
+    let schema = Arc::new(StructType::try_new([field]).unwrap());
+    let plan = Plan {
+        nodes: vec![PlanNode::new(Values::new(schema, vec![]), vec![])],
+    };
+    assert_unadmitted_map(&plan);
+}
+
+#[test]
+fn borrowed_plan_rejects_tombstone_field_patches_without_scanning() {
+    use delta_kernel::expressions::{Expression, ExpressionFieldPatch, ExpressionStructPatch};
+    let plan = expression_plan(Expression::StructPatch(ExpressionStructPatch {
+        field_patches: tombstone_map(ExpressionFieldPatch::default()),
+        ..Default::default()
+    }));
+    assert_unadmitted_map(&plan);
 }
