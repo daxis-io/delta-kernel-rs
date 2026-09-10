@@ -10,6 +10,7 @@ use crate::schema::{ArrayType, DataType, MapType, PrimitiveType, StructField, St
 // The largest field number in the plan wire grammar is 19 (two tag bytes). A protobuf
 // varint or length prefix uses at most ten bytes. Charging both also bounds fixed-width fields.
 const FIELD: usize = 2 + 10;
+pub(super) const FIELD_BOUND: usize = FIELD;
 // Bound the Rust call stack independently of caller-configured resource allowances.
 const MAX_NESTING: usize = 64;
 
@@ -31,6 +32,46 @@ pub struct PlanShape {
 }
 
 impl PlanShape {
+    pub(super) fn fixed_i64_values(
+        field_name: &str,
+        rows: usize,
+        metadata_encoded: usize,
+        additional_work: usize,
+        limits: &TaskLimits,
+    ) -> Result<Self, PlanShapeError> {
+        let mut walk = Walk {
+            limits,
+            encoded: 0,
+            work: 0,
+            schema_nodes: 0,
+            literals: true,
+        };
+        walk.check(Resource::PlanNodes, 1)?;
+        walk.check(Resource::PlanDepth, 1)?;
+        walk.add(FIELD)?;
+        walk.enter(1)?;
+        walk.add(FIELD)?;
+        walk.add(FIELD * 2)?;
+        walk.schema_enter(1)?;
+        walk.schema_enter(1)?;
+        walk.string(field_name)?;
+        walk.data_type(&DataType::LONG, 1)?;
+        walk.add(FIELD)?;
+        walk.add(metadata_encoded)?;
+        walk.work(additional_work)?;
+        for _ in 0..rows {
+            walk.enter(1)?;
+            walk.enter(1)?;
+            walk.add(FIELD)?;
+        }
+        Ok(Self {
+            nodes: 1,
+            depth: 1,
+            encoded_bytes: walk.encoded,
+            work_units: walk.work,
+        })
+    }
+
     /// Inspects `plan` under `limits`, before cloning or serializing any of its contents.
     ///
     /// `scratch` is caller-owned workspace with at least `plan.nodes.len()` entries. Only that

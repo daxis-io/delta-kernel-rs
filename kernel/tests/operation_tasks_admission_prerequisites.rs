@@ -12,31 +12,37 @@ use delta_kernel::FileMeta;
 
 thread_local! {
     static ALLOCATIONS: Cell<Option<usize>> = const { Cell::new(None) };
+    static ALLOCATED_BYTES: Cell<Option<usize>> = const { Cell::new(None) };
 }
 
 struct CountingAllocator;
 
-fn count_allocation() {
+fn count_allocation(bytes: usize) {
     let _ = ALLOCATIONS.try_with(|count| {
         if let Some(n) = count.get() {
             count.set(Some(n + 1));
+        }
+    });
+    let _ = ALLOCATED_BYTES.try_with(|count| {
+        if let Some(n) = count.get() {
+            count.set(Some(n.checked_add(bytes).unwrap()));
         }
     });
 }
 
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        count_allocation();
+        count_allocation(layout.size());
         unsafe { System.alloc(layout) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        count_allocation();
+        count_allocation(layout.size());
         unsafe { System.alloc_zeroed(layout) }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        count_allocation();
+        count_allocation(new_size);
         unsafe { System.realloc(ptr, layout, new_size) }
     }
 
@@ -1373,4 +1379,128 @@ fn borrowed_plan_rejects_tombstone_field_patches_without_scanning() {
         ..Default::default()
     }));
     assert_unadmitted_map(&plan);
+}
+
+#[test]
+fn admitted_fixed_width_producer_preflights_metadata_and_allocations() {
+    use delta_kernel::schema::MetadataValue;
+    use delta_kernel::tasks::{
+        AdmittedPlan, PlanAdmissionError, PlanMetadataEntry, Resource, TaskLimits,
+    };
+
+    let text = MetadataValue::String("physical_value".into());
+    let number = MetadataValue::Number(i64::MIN);
+    let boolean = MetadataValue::Boolean(true);
+    let metadata = [
+        PlanMetadataEntry::new("physical", &text),
+        PlanMetadataEntry::new("id", &number),
+        PlanMetadataEntry::new("enabled", &boolean),
+    ];
+    let values = [i64::MIN, -1, i64::MAX];
+    let limits = TaskLimits::qualification();
+    ALLOCATED_BYTES.with(|count| count.set(Some(0)));
+    let admitted = AdmittedPlan::try_i64_values("value", &metadata, &values, &limits).unwrap();
+    let allocated_bytes = ALLOCATED_BYTES.with(|count| count.replace(None).unwrap());
+
+    assert_eq!(admitted.shape().nodes(), 1);
+    assert_eq!(admitted.shape().depth(), 1);
+    assert_eq!(admitted.metadata_entries(), metadata.len());
+    assert!(admitted.retained_bytes() > 0);
+    assert!(admitted.metadata_bytes() > 0);
+    assert!(allocated_bytes <= admitted.retained_bytes());
+    assert_eq!(admitted.field_metadata("physical"), Some(&text));
+    assert_eq!(admitted.field_metadata("id"), Some(&number));
+    assert_eq!(admitted.field_metadata("enabled"), Some(&boolean));
+
+    let too_small = limits.with_limit(Resource::TaskStateBytes, admitted.retained_bytes() - 1);
+    ALLOCATIONS.with(|count| count.set(Some(0)));
+    let result = AdmittedPlan::try_i64_values("value", &metadata, &values, &too_small);
+    let allocations = ALLOCATIONS.with(|count| count.replace(None).unwrap());
+    assert!(matches!(
+        result,
+        Err(PlanAdmissionError::ResourceExhausted(error))
+            if error.resource == Resource::TaskStateBytes
+    ));
+    assert_eq!(allocations, 0, "rejection must precede producer allocation");
+
+    let metadata_too_small = limits.with_limit(
+        Resource::MetadataAllocatedBytes,
+        admitted.metadata_bytes() - 1,
+    );
+    ALLOCATIONS.with(|count| count.set(Some(0)));
+    let result = AdmittedPlan::try_i64_values("value", &metadata, &values, &metadata_too_small);
+    let allocations = ALLOCATIONS.with(|count| count.replace(None).unwrap());
+    assert!(matches!(
+        result,
+        Err(PlanAdmissionError::ResourceExhausted(error))
+            if error.resource == Resource::MetadataAllocatedBytes
+    ));
+    assert_eq!(allocations, 0, "metadata rejection must precede allocation");
+
+    for resource in [
+        Resource::PlanNodes,
+        Resource::PlanDepth,
+        Resource::SchemaNodes,
+        Resource::SchemaDepth,
+        Resource::WorkUnits,
+        Resource::PlanEncodedBytes,
+        Resource::TaskStateBytes,
+    ] {
+        let zero = limits.with_limit(resource, 0);
+        ALLOCATIONS.with(|count| count.set(Some(0)));
+        let result = AdmittedPlan::try_i64_values("value", &[], &values, &zero);
+        let allocations = ALLOCATIONS.with(|count| count.replace(None).unwrap());
+        assert!(matches!(
+            result,
+            Err(PlanAdmissionError::ResourceExhausted(error)) if error.resource == resource
+        ));
+        assert_eq!(allocations, 0, "{resource:?} rejection must not allocate");
+    }
+
+    let duplicate = [
+        PlanMetadataEntry::new("id", &number),
+        PlanMetadataEntry::new("id", &boolean),
+    ];
+    ALLOCATIONS.with(|count| count.set(Some(0)));
+    let result = AdmittedPlan::try_i64_values("value", &duplicate, &values, &limits);
+    let allocations = ALLOCATIONS.with(|count| count.replace(None).unwrap());
+    assert_eq!(result.unwrap_err(), PlanAdmissionError::DuplicateMetadata);
+    assert_eq!(allocations, 0, "duplicate rejection must not allocate");
+
+    let other = MetadataValue::Other(serde_json::json!({"nested": [1, 2, 3]}));
+    let unsupported = [PlanMetadataEntry::new("other", &other)];
+    ALLOCATIONS.with(|count| count.set(Some(0)));
+    let result = AdmittedPlan::try_i64_values("value", &unsupported, &values, &limits);
+    let allocations = ALLOCATIONS.with(|count| count.replace(None).unwrap());
+    assert_eq!(result.unwrap_err(), PlanAdmissionError::UnsupportedMetadata);
+    assert_eq!(allocations, 0, "unsupported metadata must not allocate");
+
+    let metadata_spec = MetadataValue::String("row_index".into());
+    let reserved = [PlanMetadataEntry::new("delta.metadataSpec", &metadata_spec)];
+    ALLOCATIONS.with(|count| count.set(Some(0)));
+    let result = AdmittedPlan::try_i64_values("value", &reserved, &values, &limits);
+    let allocations = ALLOCATIONS.with(|count| count.replace(None).unwrap());
+    assert_eq!(result.unwrap_err(), PlanAdmissionError::UnsupportedMetadata);
+    assert_eq!(
+        allocations, 0,
+        "metadata-column indexes require a separate admitted producer"
+    );
+
+    let encoded_limit = limits.with_limit(
+        Resource::PlanEncodedBytes,
+        admitted.shape().encoded_bytes() - 1,
+    );
+    ALLOCATIONS.with(|count| count.set(Some(0)));
+    let result = AdmittedPlan::try_i64_values("value", &metadata, &values, &encoded_limit);
+    let allocations = ALLOCATIONS.with(|count| count.replace(None).unwrap());
+    assert!(matches!(
+        result,
+        Err(PlanAdmissionError::ResourceExhausted(error))
+            if error.resource == Resource::PlanEncodedBytes
+    ));
+    assert_eq!(allocations, 0, "encoded-size rejection must not allocate");
+
+    let shape = admitted.shape();
+    let encoded = delta_kernel::plans::Operation::QueryPlan(admitted.into_plan()).to_proto_bytes();
+    assert!(shape.encoded_bytes() >= encoded.len());
 }

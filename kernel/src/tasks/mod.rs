@@ -7,6 +7,7 @@
 mod accounting;
 mod evaluation;
 mod machine;
+mod plan_admission;
 mod plan_shape;
 mod protocol;
 
@@ -21,6 +22,7 @@ pub use evaluation::{
     EvaluationUsage,
 };
 pub use machine::{TaskAction, TaskMachine, TaskState, TaskStatus};
+pub use plan_admission::{AdmittedPlan, PlanAdmissionError, PlanMetadataEntry};
 pub use plan_shape::{PlanShape, PlanShapeError};
 pub use protocol::{
     CancelDisposition, CancelReason, CpuSlice, EvaluationKey, FileDescriptor, OperationTask,
