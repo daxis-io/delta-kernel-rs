@@ -542,8 +542,7 @@ mod tests {
     use datafusion::arrow::array::{Array, AsArray, StringArray};
     use datafusion::assert_batches_eq;
     use datafusion::common::DFSchema;
-    use datafusion::physical_expr::create_physical_expr;
-    use datafusion::physical_expr::execution_props::ExecutionProps;
+    use datafusion::prelude::SessionContext;
     use delta_kernel::expressions::{
         col, lit, null_lit, ColumnName as KernelColumnName, Expression as KernelExpr,
         ExpressionStructPatch, ExpressionStructPatchBuilder,
@@ -1103,7 +1102,9 @@ mod tests {
         .unwrap();
 
         let df_schema = DFSchema::try_from(arrow_schema).unwrap();
-        let physical = create_physical_expr(&logical, &df_schema, &ExecutionProps::new()).unwrap();
+        let physical = SessionContext::new()
+            .create_physical_expr(logical, &df_schema)
+            .unwrap();
         physical
             .evaluate(&batch)
             .unwrap()
