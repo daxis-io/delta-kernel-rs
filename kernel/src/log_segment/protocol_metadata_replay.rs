@@ -26,6 +26,8 @@ use crate::plans::ir::nodes::Agg;
 #[cfg(feature = "declarative-plans")]
 use crate::plans::ir::nodes::FileType;
 #[cfg(feature = "declarative-plans")]
+use crate::plans::ir::plan::Plan;
+#[cfg(feature = "declarative-plans")]
 use crate::plans::{Operation, PlanBuilder, PlanExecutor};
 use crate::schema::{
     column_name, schema_ref, ColumnName, ColumnNamesAndTypes, DataType, MetadataColumnSpec,
@@ -155,6 +157,29 @@ impl LogSegment {
         &self,
         executor: &dyn PlanExecutor,
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<VersionedBatch>> + Send> {
+        let plan = self.protocol_metadata_plan()?;
+
+        let batches = executor
+            .execute_op(Operation::QueryPlan(plan))?
+            .into_data()?
+            .map(|batch| {
+                // Mark as a log batch so the checkpoint action is read from it.
+                let batch = ActionsBatch::new(batch?, true);
+                let (protocol_version, metadata_version) =
+                    pm_versions_from_plan_output(batch.actions.as_ref())?;
+                Ok(VersionedBatch {
+                    protocol_version,
+                    metadata_version,
+                    batch,
+                })
+            });
+        Ok(batches)
+    }
+
+    /// Builds the shared projected protocol/metadata replay plan. Concrete task producers
+    /// must admit all input and plan allocations before calling this helper.
+    #[cfg(feature = "declarative-plans")]
+    pub(crate) fn protocol_metadata_plan(&self) -> DeltaResult<Plan> {
         #[cfg(feature = "adaptive-metadata-in-dev")]
         let versioned_schema = schema_ref! {
             (&PROTOCOL_FIELD),
@@ -184,7 +209,7 @@ impl LogSegment {
             })
             .transpose()?;
 
-        let plan = PlanBuilder::union_all(std::iter::once(commits).chain(checkpoint))?
+        PlanBuilder::union_all(std::iter::once(commits).chain(checkpoint))?
             .aggregate_ungrouped(|a| {
                 let protocol = || column_name!(PROTOCOL_NAME);
                 let metadata = || column_name!(METADATA_NAME);
@@ -209,23 +234,7 @@ impl LogSegment {
                 );
                 a
             })?
-            .build()?;
-
-        let batches = executor
-            .execute_op(Operation::QueryPlan(plan))?
-            .into_data()?
-            .map(|batch| {
-                // Mark as a log batch so the checkpoint action is read from it.
-                let batch = ActionsBatch::new(batch?, true);
-                let (protocol_version, metadata_version) =
-                    pm_versions_from_plan_output(batch.actions.as_ref())?;
-                Ok(VersionedBatch {
-                    protocol_version,
-                    metadata_version,
-                    batch,
-                })
-            });
-        Ok(batches)
+            .build()
     }
 
     /// Reads the P&M commit cover and checkpoint, tagging each batch with its version.
@@ -272,9 +281,9 @@ impl LogSegment {
 
 /// Protocol and Metadata, each tagged with the version it was found at. Holds both a single
 /// batch's parse and the newest resolved across batches.
-struct PmCandidate {
-    protocol: Option<(i64, Protocol)>,
-    metadata: Option<(i64, Metadata)>,
+pub(crate) struct PmCandidate {
+    pub(crate) protocol: Option<(i64, Protocol)>,
+    pub(crate) metadata: Option<(i64, Metadata)>,
 }
 
 /// A P&M-projected batch with the versions to rank its Protocol and Metadata at.
@@ -391,8 +400,8 @@ fn pm_candidate(
     metadata_version: Option<i64>,
 ) -> DeltaResult<PmCandidate> {
     let actions = batch.actions.as_ref();
-    let protocol = protocol_version.zip(Protocol::try_new_from_data(actions)?);
-    let metadata = metadata_version.zip(Metadata::try_new_from_data(actions)?);
+    let PmCandidate { protocol, metadata } =
+        pm_from_data(actions, protocol_version, metadata_version)?;
     let (checkpoint_protocol, checkpoint_metadata) = match checkpoint_pm(batch)? {
         Some((version, p, m)) => (Some((version, p)), Some((version, m))),
         None => (None, None),
@@ -401,6 +410,25 @@ fn pm_candidate(
         protocol: newer(protocol, checkpoint_protocol),
         metadata: newer(metadata, checkpoint_metadata),
     })
+}
+
+/// Shares action materialization between legacy replay and admitted task completion. Task callers
+/// preflight schema JSON and visitor backing allocations before entering this helper.
+fn pm_from_data(
+    actions: &dyn EngineData,
+    protocol_version: Option<i64>,
+    metadata_version: Option<i64>,
+) -> DeltaResult<PmCandidate> {
+    Ok(PmCandidate {
+        protocol: protocol_version.zip(Protocol::try_new_from_data(actions)?),
+        metadata: metadata_version.zip(Metadata::try_new_from_data(actions)?),
+    })
+}
+
+#[cfg(feature = "operation-tasks")]
+pub(crate) fn task_pm_from_plan_output(actions: &dyn EngineData) -> DeltaResult<PmCandidate> {
+    let (protocol_version, metadata_version) = pm_versions_from_plan_output(actions)?;
+    pm_from_data(actions, protocol_version, metadata_version)
 }
 
 /// The Protocol and Metadata nested in `batch`'s `checkpoint` action, at the action's own

@@ -17,6 +17,13 @@ use crate::{EngineData, Error};
 pub trait AccountedEngineData: EngineData {
     /// Returns the physical-allocation charge, or a typed accounting-overflow error.
     fn accounted_bytes(&self) -> Result<usize, ResourceExhausted>;
+    /// Source-admitted host execution owners still live across task resumption.
+    /// Separate from page backing: these do not consume the page-byte domain.
+    /// The producing host reserves the remaining task allocation authority in
+    /// its caller pool before handoff. Zero preserves hosts with no live state.
+    fn host_retained_bytes(&self) -> usize {
+        0
+    }
 }
 
 /// Validated finite limits for one internal evaluation page.
@@ -74,6 +81,23 @@ pub struct EvaluationLimits {
 }
 
 impl EvaluationLimits {
+    /// Maximum cumulative pages, including EOF attempts.
+    pub fn pages(self) -> usize {
+        self.pages
+    }
+    /// Maximum cumulative batches.
+    pub fn batches(self) -> usize {
+        self.batches
+    }
+    /// Maximum cumulative rows, including unselected rows.
+    pub fn rows(self) -> usize {
+        self.rows
+    }
+    /// Maximum cumulative backing bytes, including released pages.
+    pub fn bytes(self) -> usize {
+        self.bytes
+    }
+
     /// Sets per-page limits and cumulative page, batch, row and byte allowances.
     ///
     /// Zero cumulative allowances deliberately cause exhaustion when that resource is needed.
@@ -149,6 +173,11 @@ impl EvaluationPage {
         &self.batches
     }
 
+    /// Transfers validated batch ownership without copying or allocating.
+    pub fn into_batches(self) -> Vec<Box<dyn AccountedEngineData>> {
+        self.batches
+    }
+
     /// Returns the total rows, including logically unselected rows.
     pub fn num_rows(&self) -> usize {
         self.rows
@@ -180,6 +209,72 @@ pub struct EvaluationUsage {
 }
 
 impl EvaluationUsage {
+    /// Admits a page and its full requested container before either a synchronous source pull
+    /// or an asynchronous host call. An attempted EOF page has the same admission requirement.
+    pub(super) fn begin_page(
+        &mut self,
+        limits: EvaluationLimits,
+    ) -> Result<usize, OperationFailure> {
+        let pages = charge(self.pages, 1, limits.pages, Resource::EvaluationPages)?;
+        charge(self.batches, 1, limits.batches, Resource::EvaluationBatches)?;
+        let requested = container_bytes(limits.page.batches, limits.page.bytes)?;
+        let bytes = charge(
+            self.bytes,
+            requested,
+            limits.bytes,
+            Resource::EvaluationBytes,
+        )?;
+        self.pages = pages;
+        self.bytes = bytes;
+        Ok(requested)
+    }
+
+    // A host has already admitted all batches. Check the original page and cumulative bounds
+    // again; do not rely on the host having used the same limits in EvaluationPage::try_new.
+    pub(super) fn record_page(
+        &mut self,
+        limits: EvaluationLimits,
+        page: Option<&EvaluationPage>,
+    ) -> Result<(), OperationFailure> {
+        let Some(page) = page else {
+            return Ok(());
+        };
+        charge(
+            0,
+            page.batches.len(),
+            limits.page.batches,
+            Resource::EvaluationBatches,
+        )?;
+        charge(0, page.rows, limits.page.rows, Resource::EvaluationRows)?;
+        charge(0, page.bytes, limits.page.bytes, Resource::EvaluationBytes)?;
+        let actual_container = container_bytes(page.batches.capacity(), limits.page.bytes)?;
+        let reserved_container = container_bytes(limits.page.batches, limits.page.bytes)?;
+        let payload = page
+            .bytes
+            .checked_sub(actual_container)
+            .ok_or_else(OperationFailure::malformed_response)?;
+        let additional = payload
+            .checked_add(actual_container.saturating_sub(reserved_container))
+            .ok_or_else(OperationFailure::malformed_response)?;
+        let batches = charge(
+            self.batches,
+            page.batches.len(),
+            limits.batches,
+            Resource::EvaluationBatches,
+        )?;
+        let rows = charge(self.rows, page.rows, limits.rows, Resource::EvaluationRows)?;
+        let bytes = charge(
+            self.bytes,
+            additional,
+            limits.bytes,
+            Resource::EvaluationBytes,
+        )?;
+        self.batches = batches;
+        self.rows = rows;
+        self.bytes = bytes;
+        Ok(())
+    }
+
     /// Returns pages begun, including the final empty EOF page if needed.
     pub fn pages(&self) -> usize {
         self.pages
@@ -272,21 +367,7 @@ impl EvaluationReader {
 
     fn read_page(&mut self) -> Result<Option<EvaluationPage>, OperationFailure> {
         let limits = self.limits;
-        let pages = charge(self.usage.pages, 1, limits.pages, Resource::EvaluationPages)?;
-        // Preflight batch admission as well as the page container before reserving or pulling.
-        charge(
-            self.usage.batches,
-            1,
-            limits.batches,
-            Resource::EvaluationBatches,
-        )?;
-        let requested = container_bytes(limits.page.batches, limits.page.bytes)?;
-        charge(
-            self.usage.bytes,
-            requested,
-            limits.bytes,
-            Resource::EvaluationBytes,
-        )?;
+        let requested = self.usage.begin_page(limits)?;
         let mut batches = Vec::new();
         batches
             .try_reserve_exact(limits.page.batches)
@@ -296,11 +377,12 @@ impl EvaluationReader {
         let mut bytes = container_bytes(batches.capacity(), limits.page.bytes)?;
         self.usage.bytes = charge(
             self.usage.bytes,
-            bytes,
+            bytes
+                .checked_sub(requested)
+                .ok_or_else(OperationFailure::malformed_response)?,
             limits.bytes,
             Resource::EvaluationBytes,
         )?;
-        self.usage.pages = pages;
         let mut rows = 0;
         for _ in 0..limits.page.batches {
             let count = charge(

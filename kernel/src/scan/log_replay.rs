@@ -825,7 +825,7 @@ fn scan_row_schema_with_parsed_columns(
 /// The transform includes `stats_parsed` only when `physical_stats_schema` is Some,
 /// and `partitionValues_parsed` only when `partition_schema` is Some.
 /// Stats are output using physical column names.
-fn get_add_transform_expr(
+pub(super) fn get_add_transform_expr(
     physical_stats_schema: Option<SchemaRef>,
     has_stats_parsed: bool,
     skip_stats: bool,

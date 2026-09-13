@@ -341,6 +341,9 @@ pub enum Scalar {
     Timestamp(i64),
     /// Microsecond precision timestamp, with no timezone.
     TimestampNtz(i64),
+    /// Nanosecond precision timestamp, adjusted to UTC.
+    #[cfg(feature = "nanosecond-timestamps")]
+    TimestampNanos(i64),
     /// Year-month interval, stored as a signed 32bit count of months (matches Spark Catalyst).
     IntervalYearMonth(i32),
     /// Day-time interval, stored as a signed 64bit count of microseconds (matches Spark Catalyst).
@@ -374,6 +377,8 @@ impl Scalar {
             Self::Boolean(_) => DataType::BOOLEAN,
             Self::Timestamp(_) => DataType::TIMESTAMP,
             Self::TimestampNtz(_) => DataType::TIMESTAMP_NTZ,
+            #[cfg(feature = "nanosecond-timestamps")]
+            Self::TimestampNanos(_) => DataType::TIMESTAMP_NANOS,
             Self::IntervalYearMonth(_) => DataType::INTERVAL_YEAR_MONTH,
             Self::IntervalDayTime(_) => DataType::INTERVAL_DAY_TIME,
             Self::Date(_) => DataType::DATE,
@@ -493,6 +498,8 @@ impl Display for Scalar {
             Self::Boolean(b) => write!(f, "{b}"),
             Self::Timestamp(ts) => write!(f, "{ts}"),
             Self::TimestampNtz(ts) => write!(f, "{ts}"),
+            #[cfg(feature = "nanosecond-timestamps")]
+            Self::TimestampNanos(ts) => write!(f, "{ts}"),
             Self::IntervalYearMonth(months) => write!(f, "{months}"),
             Self::IntervalDayTime(micros) => write!(f, "{micros}"),
             Self::Date(d) => write!(f, "{d}"),
@@ -612,6 +619,10 @@ impl Scalar {
             (Timestamp(_), _) => None,
             (TimestampNtz(a), TimestampNtz(b)) => a.partial_cmp(b),
             (TimestampNtz(_), _) => None,
+            #[cfg(feature = "nanosecond-timestamps")]
+            (TimestampNanos(a), TimestampNanos(b)) => a.partial_cmp(b),
+            #[cfg(feature = "nanosecond-timestamps")]
+            (TimestampNanos(_), _) => None,
             (IntervalYearMonth(a), IntervalYearMonth(b)) => a.partial_cmp(b),
             (IntervalYearMonth(_), _) => None,
             (IntervalDayTime(a), IntervalDayTime(b)) => a.partial_cmp(b),
@@ -977,6 +988,22 @@ impl PrimitiveType {
             // epoch. The difference arises mostly in how they are to be handled on the engine
             // side - i.e. timestampNTZ is not adjusted to UTC, this is just so we can
             // (de-)serialize it as a date string.
+            #[cfg(feature = "nanosecond-timestamps")]
+            TimestampNanos => {
+                let mut timestamp = NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%.f");
+
+                if timestamp.is_err() {
+                    // Note: `%+` specifies the ISO 8601 / RFC 3339 format
+                    timestamp = DateTime::parse_from_str(raw, "%+").map(|dt| dt.naive_utc());
+                }
+                let timestamp = timestamp.map_err(|_| self.parse_error(raw))?;
+                let timestamp = Utc.from_utc_datetime(&timestamp);
+                let nanos = timestamp
+                    .signed_duration_since(DateTime::UNIX_EPOCH)
+                    .num_nanoseconds()
+                    .ok_or(self.parse_error(raw))?;
+                Ok(Scalar::TimestampNanos(nanos))
+            }
             TimestampNtz | Timestamp => {
                 let mut timestamp = NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%.f");
 

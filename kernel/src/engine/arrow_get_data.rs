@@ -1,6 +1,8 @@
 use std::ops::Range;
 
 use crate::arrow::array::cast::AsArray;
+#[cfg(feature = "nanosecond-timestamps")]
+use crate::arrow::array::types::TimestampNanosecondType;
 use crate::arrow::array::types::{
     Date32Type, Decimal128Type, Float32Type, Float64Type, GenericBinaryType, GenericStringType,
     Int16Type, Int32Type, Int64Type, Int8Type, TimestampMicrosecondType,
@@ -614,5 +616,12 @@ mod tests {
         let float_array = Float32Array::from(vec![Some(1.0f32)]);
         assert!(float_array.get_int(0, "f").is_err());
         assert!(float_array.get_double(0, "f").is_err());
+    }
+}
+
+#[cfg(feature = "nanosecond-timestamps")]
+impl GetData<'_> for PrimitiveArray<TimestampNanosecondType> {
+    fn get_timestamp(&self, row_index: usize, _field_name: &str) -> DeltaResult<Option<i64>> {
+        Ok(self.is_valid(row_index).then(|| self.value(row_index)))
     }
 }

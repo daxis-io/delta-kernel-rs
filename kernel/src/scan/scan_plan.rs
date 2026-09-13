@@ -53,6 +53,37 @@ impl Scan {
         &self,
         shape: &CheckpointShape,
     ) -> DeltaResult<Option<Plan>> {
+        self.build_metadata_scan_plan_output(shape, false)
+    }
+
+    /// Builds the same live-add plan with the existing scan-row projection. The task producer
+    /// admits its fixed plan shape and descriptor allocations before entering this helper.
+    #[cfg(feature = "operation-tasks")]
+    pub(crate) fn json_task_scan_plan(&self) -> DeltaResult<Option<Plan>> {
+        if self.snapshot.log_segment().checkpoint_version.is_some()
+            || !self
+                .snapshot
+                .log_segment()
+                .listed
+                .checkpoint_parts
+                .is_empty()
+        {
+            return Err(Error::unsupported(
+                "JSON operation tasks do not support checkpoints",
+            ));
+        }
+        let shape = CheckpointShape {
+            checkpoint_type: crate::checkpoint::CheckpointType::None,
+            parsed_stats_schema: None,
+        };
+        self.build_metadata_scan_plan_output(&shape, true)
+    }
+
+    fn build_metadata_scan_plan_output(
+        &self,
+        shape: &CheckpointShape,
+        scan_rows: bool,
+    ) -> DeltaResult<Option<Plan>> {
         let state = &self.state_info;
         // A statically-unsatisfiable predicate (e.g. `x > 10 AND FALSE`) skips the whole table.
         if state.physical_predicate == PhysicalPredicate::StaticSkipAll {
@@ -97,23 +128,42 @@ impl Scan {
             )
         })?;
 
-        let checkpoint_adds = self
-            .checkpoint_arm(shape)?
-            .try_fold_with(prune, |p, prune| p.filter(prune.clone()))?;
-
-        let checkpoint_live_adds = checkpoint_adds
-            .anti_join(
-                deduped_commit.clone(),
-                [column_name!(FILE_ACTION_KEY)],
-                [column_name!(FILE_ACTION_KEY)],
-            )?
-            .project(output_expr.clone(), output_schema.clone())?;
+        // A no-checkpoint history has no checkpoint rows. Avoid constructing
+        // schemas, patches and key expressions for an arm that the builder
+        // would immediately discard as absent. Both synchronous replay and the
+        // admitted task continue to share this exact live-add producer.
+        let checkpoint_live_adds = if matches!(&shape.checkpoint_type, CheckpointType::None) {
+            None
+        } else {
+            let checkpoint_adds = self
+                .checkpoint_arm(shape)?
+                .try_fold_with(prune, |p, prune| p.filter(prune.clone()))?;
+            Some(
+                checkpoint_adds
+                    .anti_join(
+                        deduped_commit.clone(),
+                        [column_name!(FILE_ACTION_KEY)],
+                        [column_name!(FILE_ACTION_KEY)],
+                    )?
+                    .project(output_expr.clone(), output_schema.clone())?,
+            )
+        };
 
         let commit_live_adds = deduped_commit
             .filter(col!("add").is_not_null())?
             .project(output_expr, output_schema)?;
 
-        PlanBuilder::union_all([commit_live_adds, checkpoint_live_adds])?.build_opt()
+        let plan =
+            PlanBuilder::union_all(std::iter::once(commit_live_adds).chain(checkpoint_live_adds))?;
+        let plan = if scan_rows {
+            plan.project(
+                super::log_replay::get_add_transform_expr(None, false, true, false, None, false),
+                super::scan_row_schema(),
+            )?
+        } else {
+            plan
+        };
+        plan.build_opt()
     }
 
     /// Build normalized checkpoint adds. Returns an empty relation when no checkpoint exists.

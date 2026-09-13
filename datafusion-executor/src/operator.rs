@@ -12,7 +12,9 @@
 
 use std::sync::Arc;
 
-use datafusion::arrow::datatypes::Schema as ArrowSchema;
+use datafusion::arrow::datatypes::{
+    DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema,
+};
 use datafusion::common::{DFSchema, DataFusionError, NullEquality};
 use datafusion::functions_aggregate::expr_fn::{count, max, min, sum};
 use datafusion::functions_aggregate::first_last::first_value_udaf;
@@ -30,8 +32,6 @@ use delta_kernel::plans::ir::nodes::{
 };
 use delta_kernel::schema::{StructField, StructType};
 
-use crate::expression::to_df_struct_columns;
-use crate::predicate::to_df_predicate_expr;
 use crate::scalar::to_df_scalar;
 use crate::utils::column_to_df_expr;
 
@@ -43,6 +43,41 @@ use crate::utils::column_to_df_expr;
 pub(crate) fn lower_operator(
     op: &KernelOperator,
     inputs: &[Arc<DFLogicalPlan>],
+) -> Result<DFLogicalPlan, DataFusionError> {
+    lower_operator_inner(op, inputs, false)
+}
+
+/// Only the two admitted JSON producers use this mode. Constructed structs may
+/// inherit nullable children from CASE expressions over nullable log actions.
+/// Widen that internal representation without relaxing the JSON input schema.
+pub(crate) fn lower_metadata_operator(
+    op: &KernelOperator,
+    inputs: &[Arc<DFLogicalPlan>],
+    input_schema: &StructType,
+) -> Result<DFLogicalPlan, DataFusionError> {
+    let [input] = inputs else {
+        return Err(DataFusionError::Plan(
+            "closed metadata operator requires one input".into(),
+        ));
+    };
+    match op {
+        KernelOperator::Project(project) => {
+            lower_project_with_schema(project, input, true, input_schema)
+        }
+        KernelOperator::Filter(filter) => {
+            lower_filter_with_schema(filter, input, input_schema, true)
+        }
+        KernelOperator::Aggregate(aggregate) => lower_aggregate(aggregate, input, true),
+        _ => Err(DataFusionError::NotImplemented(
+            "closed metadata operator".into(),
+        )),
+    }
+}
+
+fn lower_operator_inner(
+    op: &KernelOperator,
+    inputs: &[Arc<DFLogicalPlan>],
+    metadata: bool,
 ) -> Result<DFLogicalPlan, DataFusionError> {
     let input_count_error = |expected: usize| {
         DataFusionError::Plan(format!(
@@ -61,7 +96,7 @@ pub(crate) fn lower_operator(
             let [input] = inputs else {
                 return Err(input_count_error(1));
             };
-            lower_project(project, input)
+            lower_project(project, input, metadata)
         }
         KernelOperator::Filter(filter) => {
             let [input] = inputs else {
@@ -73,7 +108,7 @@ pub(crate) fn lower_operator(
             let [input] = inputs else {
                 return Err(input_count_error(1));
             };
-            lower_aggregate(aggregate, input)
+            lower_aggregate(aggregate, input, metadata)
         }
         KernelOperator::SemiJoin(semi_join) => {
             let [probe, build] = inputs else {
@@ -102,24 +137,66 @@ pub(crate) fn lower_operator(
 fn lower_project(
     project: &KernelProject,
     input: &Arc<DFLogicalPlan>,
+    metadata: bool,
 ) -> Result<DFLogicalPlan, DataFusionError> {
     let input_schema: StructType = input.schema().as_arrow().try_into_kernel()?;
-    let arrow_schema: ArrowSchema = project.schema.as_ref().try_into_arrow()?;
+    lower_project_with_schema(project, input, metadata, &input_schema)
+}
+
+fn lower_project_with_schema(
+    project: &KernelProject,
+    input: &Arc<DFLogicalPlan>,
+    metadata: bool,
+    input_schema: &StructType,
+) -> Result<DFLogicalPlan, DataFusionError> {
+    let arrow_schema = output_schema(project.schema.as_ref(), metadata)?;
     let df_schema = Arc::new(DFSchema::try_from(arrow_schema)?);
-    let columns = to_df_struct_columns(&project.expr, &input_schema, project.schema.as_ref())
-        .map_err(|error| DataFusionError::External(Box::new(error)))?
-        .into_guarded_columns();
+    let columns = crate::expression::to_df_struct_columns_scoped(
+        &project.expr,
+        input_schema,
+        project.schema.as_ref(),
+        metadata,
+    )
+    .map_err(|error| DataFusionError::External(Box::new(error)))?
+    .into_guarded_columns();
     let exprs: Result<Vec<DFExpr>, DataFusionError> = columns
         .into_iter()
         .zip(project.schema.fields())
         .map(|((name, expr), field)| {
-            let target = field.data_type().try_into_arrow()?;
+            let target = output_type(field.data_type().try_into_arrow()?, metadata);
+            let expr = if metadata {
+                rewrite_metadata_coalesce(expr)?
+            } else {
+                expr
+            };
             let expr = expr.cast_to(&target, input.schema())?.alias(name);
             Ok(expr)
         })
         .collect();
     let projection = DFProjection::try_new_with_schema(exprs?, Arc::clone(input), df_schema)?;
     Ok(DFLogicalPlan::Projection(projection))
+}
+
+/// The closed producer's sole planning-only builtin is Coalesce. Reuse its
+/// actual DataFusion rewrite once, bottom-up; do not invoke general optimizer
+/// passes or user function registries. Inputs here were just constructed by
+/// to_df_struct_columns for the admitted system plan, never supplied ASTs.
+fn rewrite_metadata_coalesce(expr: DFExpr) -> Result<DFExpr, DataFusionError> {
+    use datafusion::common::tree_node::{Transformed, TransformedResult, TreeNode};
+    use datafusion::functions::core::coalesce::CoalesceFunc;
+    use datafusion::logical_expr::simplify::ExprSimplifyResult;
+    expr.transform_up(|expr| match expr {
+        DFExpr::ScalarFunction(function) if function.func.inner().is::<CoalesceFunc>() => {
+            match CoalesceFunc::simplify_arguments(function.args)? {
+                ExprSimplifyResult::Simplified(expr) => Ok(Transformed::yes(expr)),
+                _ => Err(DataFusionError::Internal(
+                    "closed coalesce rewrite did not simplify".into(),
+                )),
+            }
+        }
+        expr => Ok(Transformed::no(expr)),
+    })
+    .data()
 }
 
 /// Lowers a [`SemiJoin`](KernelSemiJoin) to a DataFusion left semi or left anti join over its probe
@@ -222,11 +299,12 @@ fn lower_union_all(
 fn lower_aggregate(
     aggregate: &KernelAggregate,
     input: &Arc<DFLogicalPlan>,
+    metadata: bool,
 ) -> Result<DFLogicalPlan, DataFusionError> {
     let input_schema = input.schema().as_ref();
     let output_fields = Vec::from_iter(aggregate.schema.fields());
     if aggregate.group_by.is_empty() && aggregate.aggs.is_empty() {
-        let arrow_schema: ArrowSchema = aggregate.schema.as_ref().try_into_arrow()?;
+        let arrow_schema = output_schema(aggregate.schema.as_ref(), metadata)?;
         let empty = EmptyRelation {
             produce_one_row: true,
             schema: Arc::new(arrow_schema.try_into()?),
@@ -239,8 +317,13 @@ fn lower_aggregate(
         .iter()
         .enumerate()
         .map(|(index, column)| {
-            let expr = column_to_df_expr(column, input_schema)?;
-            cast_aggregate_output(expr, output_fields.get(index).copied(), input_schema)
+            let expr = crate::utils::column_to_df_expr_scoped(column, input_schema, metadata)?;
+            cast_aggregate_output(
+                expr,
+                output_fields.get(index).copied(),
+                input_schema,
+                metadata,
+            )
         })
         .collect();
     let aggregate_exprs: Result<Vec<_>, DataFusionError> = aggregate
@@ -248,18 +331,56 @@ fn lower_aggregate(
         .iter()
         .enumerate()
         .map(|(index, agg)| {
-            let expr = lower_aggregate_function(agg, input_schema)?;
+            let expr = if metadata {
+                let KernelAgg::MaxNonNullBy(operands) = agg else {
+                    return Err(DataFusionError::Internal("closed aggregate kind".into()));
+                };
+                lower_non_null_by_scoped(
+                    &operands.value,
+                    &operands.null_sentinel,
+                    &operands.key,
+                    input_schema,
+                    false,
+                    true,
+                )?
+            } else {
+                lower_aggregate_function(agg, input_schema)?
+            };
             let field_index = aggregate.group_by.len() + index;
-            cast_aggregate_output(expr, output_fields.get(field_index).copied(), input_schema)
+            cast_aggregate_output(
+                expr,
+                output_fields.get(field_index).copied(),
+                input_schema,
+                metadata,
+            )
         })
         .collect();
 
-    let arrow_schema: ArrowSchema = aggregate.schema.as_ref().try_into_arrow()?;
+    let group_exprs = group_exprs?;
+    let aggregate_exprs = aggregate_exprs?;
+    let mut arrow_schema: ArrowSchema = aggregate.schema.as_ref().try_into_arrow()?;
+    if metadata {
+        // An aggregate's argument/result type already reflects the constructed
+        // projection beneath it. Keep the aggregate expression bare: physical
+        // planning requires aggregate functions, not casts around functions.
+        let fields: Result<Vec<_>, DataFusionError> = arrow_schema
+            .fields()
+            .iter()
+            .zip(group_exprs.iter().chain(&aggregate_exprs))
+            .map(|(field, expr)| {
+                Ok(field
+                    .as_ref()
+                    .clone()
+                    .with_data_type(expr.get_type(input_schema)?))
+            })
+            .collect();
+        arrow_schema = ArrowSchema::new(fields?);
+    }
     let df_schema = Arc::new(DFSchema::try_from(arrow_schema)?);
     let df_aggregate = DFAggregate::try_new_with_schema(
         Arc::clone(input),
-        group_exprs?,
-        aggregate_exprs?,
+        group_exprs,
+        aggregate_exprs,
         df_schema,
     )?;
     Ok(DFLogicalPlan::Aggregate(df_aggregate))
@@ -269,14 +390,57 @@ fn cast_aggregate_output(
     expr: DFExpr,
     field: Option<&StructField>,
     input_schema: &DFSchema,
+    metadata: bool,
 ) -> Result<DFExpr, DataFusionError> {
     let Some(field) = field else {
         // No output field matches this expression; keep it for DataFusion's arity check.
         return Ok(expr);
     };
-    let target = field.data_type().try_into_arrow()?;
-    let expr = expr.cast_to(&target, input_schema)?;
+    let expr = if metadata {
+        expr
+    } else {
+        expr.cast_to(&field.data_type().try_into_arrow()?, input_schema)?
+    };
     Ok(expr.alias(field.name().clone()))
+}
+
+// Map/list children retain their invariants (in particular non-null map keys).
+// The admitted producers construct only structs, not new map/list containers.
+fn output_type(data_type: ArrowDataType, metadata: bool) -> ArrowDataType {
+    match data_type {
+        ArrowDataType::Struct(fields) if metadata => ArrowDataType::Struct(
+            fields
+                .iter()
+                .map(|field| {
+                    Arc::new(
+                        field
+                            .as_ref()
+                            .clone()
+                            .with_data_type(output_type(field.data_type().clone(), true))
+                            .with_nullable(true),
+                    )
+                })
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+fn output_schema(schema: &StructType, metadata: bool) -> Result<ArrowSchema, DataFusionError> {
+    let schema: ArrowSchema = schema.try_into_arrow()?;
+    if !metadata {
+        return Ok(schema);
+    }
+    Ok(ArrowSchema::new(
+        schema
+            .fields()
+            .iter()
+            .map(|field| {
+                ArrowField::clone(field.as_ref())
+                    .with_data_type(output_type(field.data_type().clone(), true))
+            })
+            .collect::<Vec<_>>(),
+    ))
 }
 
 fn lower_aggregate_function(
@@ -314,11 +478,30 @@ fn lower_non_null_by(
     input_schema: &DFSchema,
     ascending: bool,
 ) -> Result<DFExpr, DataFusionError> {
-    let value = column_to_df_expr(value, input_schema)?;
-    let null_sentinel = column_to_df_expr(null_sentinel, input_schema)?;
-    let key = column_to_df_expr(key, input_schema)?;
+    lower_non_null_by_scoped(value, null_sentinel, key, input_schema, ascending, false)
+}
+
+fn lower_non_null_by_scoped(
+    value: &KernelColumnName,
+    null_sentinel: &KernelColumnName,
+    key: &KernelColumnName,
+    input_schema: &DFSchema,
+    ascending: bool,
+    task_local: bool,
+) -> Result<DFExpr, DataFusionError> {
+    let value = crate::utils::column_to_df_expr_scoped(value, input_schema, task_local)?;
+    let null_sentinel =
+        crate::utils::column_to_df_expr_scoped(null_sentinel, input_schema, task_local)?;
+    let key = crate::utils::column_to_df_expr_scoped(key, input_schema, task_local)?;
     let filter = null_sentinel.is_not_null().and(key.clone().is_not_null());
-    let first_value = first_value_udaf().call(vec![value]);
+    let first_value = if task_local {
+        datafusion::logical_expr::AggregateUDF::new_from_impl(
+            datafusion::functions_aggregate::first_last::FirstValue::new(),
+        )
+        .call(vec![value])
+    } else {
+        first_value_udaf().call(vec![value])
+    };
     first_value
         .order_by(vec![key.sort(ascending, false)])
         .filter(filter)
@@ -332,8 +515,23 @@ fn lower_filter(
     input: &Arc<DFLogicalPlan>,
 ) -> Result<DFLogicalPlan, DataFusionError> {
     let input_schema: StructType = input.schema().as_arrow().try_into_kernel()?;
-    let predicate = to_df_predicate_expr(&filter.predicate, &input_schema)
-        .map_err(|error| DataFusionError::External(Box::new(error)))?;
+    lower_filter_with_schema(filter, input, &input_schema, false)
+}
+
+fn lower_filter_with_schema(
+    filter: &KernelFilter,
+    input: &Arc<DFLogicalPlan>,
+    input_schema: &StructType,
+    task_local: bool,
+) -> Result<DFLogicalPlan, DataFusionError> {
+    let predicate = crate::predicate::to_df_predicate_scoped(
+        &filter.predicate,
+        &crate::expression::ExpressionLowering {
+            schema: input_schema,
+            task_local,
+        },
+    )
+    .map_err(|error| DataFusionError::External(Box::new(error)))?;
     let filter = DFFilter::try_new(predicate, Arc::clone(input))?;
     Ok(DFLogicalPlan::Filter(filter))
 }

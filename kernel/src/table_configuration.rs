@@ -28,6 +28,8 @@ use crate::schema::{
 };
 #[cfg(feature = "geo-type-in-dev")]
 use crate::table_features::validate_geospatial_feature_support;
+#[cfg(feature = "nanosecond-timestamps")]
+use crate::table_features::validate_timestamp_nanos_feature_support;
 use crate::table_features::{
     check_reader_version_range, column_mapping_mode, extract_enabled_reader_features,
     get_any_level_column_physical_name, validate_iceberg_compat_if_needed,
@@ -153,6 +155,19 @@ impl TableConfiguration {
         Self::try_new_inner(metadata, protocol, table_root, version, logical_schema)
     }
 
+    /// Same constructor semantics after task-owned schema admission, with the
+    /// shared schema parser's bounded error conversion (no ambient backtrace).
+    #[cfg(feature = "operation-tasks")]
+    pub(crate) fn try_new_json_task(
+        metadata: Metadata,
+        protocol: Protocol,
+        table_root: Url,
+        version: Version,
+    ) -> DeltaResult<Self> {
+        let logical_schema = Arc::new(metadata.parse_schema_for_task()?);
+        Self::try_new_inner(metadata, protocol, table_root, version, logical_schema)
+    }
+
     /// Like [`try_new`](Self::try_new), but reuses `base`'s protocol, table root, and version
     /// and takes a pre-parsed `logical_schema`.
     pub(crate) fn try_new_with_schema(
@@ -223,6 +238,8 @@ impl TableConfiguration {
 
         // Validate schema against protocol features now that we have a TC instance.
         validate_timestamp_ntz_feature_support(&table_config)?;
+        #[cfg(feature = "nanosecond-timestamps")]
+        validate_timestamp_nanos_feature_support(&table_config)?;
         validate_variant_type_feature_support(&table_config)?;
         // Reject corrupt column-default metadata (a non-string `CURRENT_DEFAULT`, or a non-`NULL`
         // default on a Variant column) and retain whether the validated schema declares any column
@@ -952,6 +969,8 @@ mod test {
     use crate::schema::{
         column_name, schema, schema_ref, ColumnName, DataType, SchemaRef, StructField,
     };
+    #[cfg(feature = "nanosecond-timestamps")]
+    use crate::table_features::validate_timestamp_nanos_feature_support;
     use crate::table_features::{
         ColumnMappingMode, FeatureType, Operation, TableFeature, TABLE_FEATURES_MIN_READER_VERSION,
         TABLE_FEATURES_MIN_WRITER_VERSION,

@@ -24,6 +24,16 @@ use crate::operator::lower_operator;
 /// # Errors
 /// Returns an error if `plan` has no nodes, or if lowering any individual node fails.
 pub(crate) fn to_df_plan(plan: &KernelPlan) -> Result<DFLogicalPlan, DataFusionError> {
+    lower_plan(plan, None)
+}
+
+pub(crate) fn lower_plan(
+    plan: &KernelPlan,
+    json: Option<(
+        &delta_kernel::tasks::LogIdentityManifest,
+        &Arc<dyn object_store::ObjectStore>,
+    )>,
+) -> Result<DFLogicalPlan, DataFusionError> {
     // A node is identified by its index, and `nodes` is topologically ordered: every input index is
     // strictly less than the node's own, so a single forward pass leaves each node's inputs already
     // lowered by the time it is reached.
@@ -47,7 +57,23 @@ pub(crate) fn to_df_plan(plan: &KernelPlan) -> Result<DFLogicalPlan, DataFusionE
                 Ok(Arc::clone(input))
             })
             .try_collect()?;
-        lowered.push(Arc::new(lower_operator(op, &inputs)?));
+        let logical = match (op, json) {
+            (delta_kernel::plans::ir::nodes::Operator::ScanJson(scan), Some((manifest, store)))
+                if inputs.is_empty() =>
+            {
+                crate::json_scan::lower_scan_json(scan, manifest, Arc::clone(store))?
+            }
+            (_, Some(_)) => {
+                let schema = node
+                    .inputs
+                    .first()
+                    .and_then(|index| closed_input_schema(plan, *index))
+                    .ok_or_else(|| DataFusionError::Plan("closed metadata input schema".into()))?;
+                crate::operator::lower_metadata_operator(op, &inputs, schema)?
+            }
+            _ => lower_operator(op, &inputs)?,
+        };
+        lowered.push(Arc::new(logical));
     }
 
     // The terminal node is the last one: no other node consumes it, and its rows are the plan's
@@ -57,6 +83,34 @@ pub(crate) fn to_df_plan(plan: &KernelPlan) -> Result<DFLogicalPlan, DataFusionE
         None => Err(DataFusionError::Plan(
             "cannot lower a plan with no nodes".to_string(),
         )),
+    }
+}
+
+/// Borrow the exact producer's declared schema through schema-preserving
+/// filters. This avoids rebuilding Kernel schemas from Arrow during metadata
+/// lowering. Generic operator conversion retains its original round trip.
+pub(crate) fn closed_input_schema(
+    plan: &KernelPlan,
+    mut index: usize,
+) -> Option<&delta_kernel::schema::StructType> {
+    use delta_kernel::plans::ir::nodes::Operator;
+    loop {
+        let node = plan.nodes.get(index)?;
+        match &node.op {
+            Operator::ScanJson(op) => return Some(&op.schema),
+            Operator::Project(op) => return Some(&op.schema),
+            Operator::Aggregate(op) => return Some(&op.schema),
+            Operator::Filter(_) => {
+                let [parent] = node.inputs.as_slice() else {
+                    return None;
+                };
+                if *parent >= index {
+                    return None;
+                }
+                index = *parent;
+            }
+            _ => return None,
+        }
     }
 }
 

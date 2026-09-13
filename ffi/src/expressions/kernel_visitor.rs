@@ -541,6 +541,7 @@ impl NullTypeTag {
     /// `tag` is [`NullTypeTag::Decimal`]; they are zero for all other types.
     pub(crate) fn from_data_type(data_type: &DataType) -> (Self, u8, u8) {
         match data_type {
+            #[allow(unreachable_patterns)]
             DataType::Primitive(p) => match p {
                 PrimitiveType::Boolean => (Self::Boolean, 0, 0),
                 PrimitiveType::Byte => (Self::Byte, 0, 0),
@@ -570,6 +571,8 @@ impl NullTypeTag {
                 PrimitiveType::Geometry(_) | PrimitiveType::Geography(_) => {
                     (Self::NonPrimitive, 0, 0)
                 }
+                // Dependency feature unification may expose additional opaque types.
+                _ => (Self::NonPrimitive, 0, 0),
             },
             _ => (Self::NonPrimitive, 0, 0),
         }

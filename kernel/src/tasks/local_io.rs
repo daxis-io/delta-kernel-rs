@@ -75,8 +75,7 @@ impl LocalFileIoSource {
             &root,
             Path::new(""),
             &root_text,
-            count_limit,
-            byte_limit,
+            (count_limit, byte_limit),
             &mut discovered,
             &mut retained,
             &mut entries,
@@ -166,10 +165,13 @@ impl AdmittedIoSource for LocalFileIoSource {
                 path,
                 size: entry.descriptor.size,
                 modification_time: entry.descriptor.modification_time,
+                identity: entry.descriptor.identity,
             });
         }
         let (continuation, binding) = if count == entries {
-            let last = files.last().expect("a full nonzero page has a last entry");
+            let last = files
+                .last()
+                .ok_or_else(OperationFailure::malformed_response)?;
             check_limit(
                 Resource::ContinuationBytes,
                 continuation_bytes,
@@ -350,12 +352,12 @@ fn discover(
     directory: &File,
     relative_directory: &Path,
     requested_root: &str,
-    count_limit: usize,
-    byte_limit: usize,
+    limits: (usize, usize),
     discovered: &mut usize,
     retained: &mut usize,
     entries: &mut Vec<LocalEntry>,
 ) -> Result<(), OperationFailure> {
+    let (count_limit, byte_limit) = limits;
     let directory_entries = Dir::read_from(directory).map_err(rustix_failure)?;
     for entry in directory_entries {
         let entry = entry.map_err(rustix_failure)?;
@@ -377,8 +379,7 @@ fn discover(
                 &file,
                 &relative,
                 requested_root,
-                count_limit,
-                byte_limit,
+                limits,
                 discovered,
                 retained,
                 entries,
@@ -406,6 +407,7 @@ fn discover(
                 path,
                 size: metadata.len(),
                 modification_time: modification_time_millis(&metadata)?,
+                identity: identity(&metadata),
             },
         });
     }

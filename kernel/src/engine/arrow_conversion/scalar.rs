@@ -16,6 +16,8 @@
 
 use super::TryFromKernel as _;
 use crate::arrow::array::cast::AsArray;
+#[cfg(feature = "nanosecond-timestamps")]
+use crate::arrow::array::types::TimestampNanosecondType;
 use crate::arrow::array::types::{
     Date32Type, Decimal128Type, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type,
     Int8Type, TimestampMicrosecondType,
@@ -106,6 +108,8 @@ impl Scalar {
                 // timezone was already set at builder construction time
                 append_val_n_as!(array::TimestampMicrosecondBuilder, *val)
             }
+            #[cfg(feature = "nanosecond-timestamps")]
+            TimestampNanos(val) => append_val_n_as!(array::TimestampNanosecondBuilder, *val),
             IntervalYearMonth(val) => append_val_n_as!(array::Int32Builder, *val),
             IntervalDayTime(val) => append_val_n_as!(array::Int64Builder, *val),
             Date(val) => append_val_n_as!(array::Date32Builder, *val),
@@ -186,6 +190,8 @@ impl Scalar {
             DataType::TIMESTAMP | DataType::TIMESTAMP_NTZ => {
                 append_nulls_as!(array::TimestampMicrosecondBuilder)
             }
+            #[cfg(feature = "nanosecond-timestamps")]
+            DataType::TIMESTAMP_NANOS => append_nulls_as!(array::TimestampNanosecondBuilder),
             DataType::DATE => append_nulls_as!(array::Date32Builder),
             DataType::BINARY => append_nulls_as!(array::BinaryBuilder),
             DataType::Primitive(PrimitiveType::Decimal(_)) => {
@@ -325,6 +331,14 @@ pub fn extract_primitive_scalar(array: &dyn Array, row_idx: usize) -> DeltaResul
                 .as_primitive::<TimestampMicrosecondType>()
                 .value(row_idx),
         )),
+        #[cfg(feature = "nanosecond-timestamps")]
+        ArrowDataType::Timestamp(TimeUnit::Nanosecond, Some(tz)) if !tz.is_empty() => {
+            Ok(Scalar::TimestampNanos(
+                array
+                    .as_primitive::<TimestampNanosecondType>()
+                    .value(row_idx),
+            ))
+        }
         ArrowDataType::Decimal128(precision, scale) => {
             if *scale < 0 {
                 return Err(Error::generic(format!(

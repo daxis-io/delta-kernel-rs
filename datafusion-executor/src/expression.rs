@@ -26,9 +26,73 @@ use delta_kernel::schema::{
 };
 use delta_kernel::{DeltaResult, EngineData, Error};
 
-use crate::predicate::to_df_predicate_expr;
+use crate::predicate::to_df_predicate_scoped;
 use crate::scalar::to_df_scalar;
-use crate::utils::column_to_df_expr;
+
+/// Pure lowering scope. Task-owned builtins never initialize process-global
+/// LazyLocks; ordinary conversion keeps the existing singleton helpers.
+pub(crate) struct ExpressionLowering<'a> {
+    pub(crate) schema: &'a StructType,
+    pub(crate) task_local: bool,
+}
+impl std::ops::Deref for ExpressionLowering<'_> {
+    type Target = StructType;
+    fn deref(&self) -> &StructType {
+        self.schema
+    }
+}
+impl ExpressionLowering<'_> {
+    fn column(&self, name: &delta_kernel::expressions::ColumnName) -> DeltaResult<DFExpr> {
+        crate::utils::column_to_df_expr_scoped(name, self.schema, self.task_local)
+    }
+    fn get_field(&self, base: DFExpr, name: String) -> DFExpr {
+        if self.task_local {
+            ScalarUDF::new_from_impl(datafusion::functions::core::getfield::GetFieldFunc::new())
+                .call(vec![base, lit(name)])
+        } else {
+            get_field(base, name)
+        }
+    }
+}
+
+pub fn to_df_expr(
+    expr: &KernelExpression,
+    input_schema: &StructType,
+    output_type: Option<&KernelDataType>,
+) -> DeltaResult<DFExpr> {
+    to_df_expr_scoped(
+        expr,
+        &ExpressionLowering {
+            schema: input_schema,
+            task_local: false,
+        },
+        output_type,
+    )
+}
+
+pub(crate) fn to_df_struct_columns(
+    expr: &KernelExpression,
+    input_schema: &StructType,
+    output_type: &StructType,
+) -> DeltaResult<StructColumns> {
+    to_df_struct_columns_scoped(expr, input_schema, output_type, false)
+}
+
+pub(crate) fn to_df_struct_columns_scoped(
+    expr: &KernelExpression,
+    input_schema: &StructType,
+    output_type: &StructType,
+    task_local: bool,
+) -> DeltaResult<StructColumns> {
+    struct_columns_scoped(
+        expr,
+        &ExpressionLowering {
+            schema: input_schema,
+            task_local,
+        },
+        output_type,
+    )
+}
 
 /// Converts `expr` into the equivalent DataFusion [`Expr`](DFExpr), resolving column references
 /// against `input_schema`.
@@ -44,29 +108,29 @@ use crate::utils::column_to_df_expr;
 /// information is incompatible with the expression, or a `StructPatch` is inconsistent with its
 /// input or output schema. Returns [`Error::unsupported`] when no DataFusion equivalent is
 /// implemented.
-pub fn to_df_expr(
+pub(crate) fn to_df_expr_scoped(
     expr: &KernelExpression,
-    input_schema: &StructType,
+    input_schema: &ExpressionLowering<'_>,
     output_type: Option<&KernelDataType>,
 ) -> DeltaResult<DFExpr> {
     match expr {
         KernelExpression::Literal(scalar) => Ok(lit(to_df_scalar(scalar)?)),
-        KernelExpression::Column(name) => column_to_df_expr(name, input_schema),
-        KernelExpression::Binary(binary) => binary_expr_to_df_expr(binary, input_schema),
+        KernelExpression::Column(name) => input_schema.column(name),
+        KernelExpression::Binary(binary) => binary_expr_to_df_expr_scoped(binary, input_schema),
         KernelExpression::Variadic(variadic) => {
-            variadic_to_df_expr(variadic, input_schema, output_type)
+            variadic_to_df_expr_scoped(variadic, input_schema, output_type)
         }
-        KernelExpression::Predicate(pred) => to_df_predicate_expr(pred, input_schema),
+        KernelExpression::Predicate(pred) => to_df_predicate_scoped(pred, input_schema),
         KernelExpression::Struct(fields, nullability) => {
-            struct_to_df_expr(fields, nullability.as_ref(), input_schema, output_type)
+            struct_to_df_expr_scoped(fields, nullability.as_ref(), input_schema, output_type)
         }
         KernelExpression::StructPatch(patch) => {
-            struct_patch_to_df_expr(patch, input_schema, output_type)
+            struct_patch_to_df_expr_scoped(patch, input_schema, output_type)
         }
         KernelExpression::MapToStruct(map_to_struct) => {
-            map_to_struct_to_df_expr(map_to_struct, input_schema, output_type)
+            map_to_struct_to_df_expr_scoped(map_to_struct, input_schema, output_type)
         }
-        KernelExpression::ParseJson(parse) => parse_json_to_df_expr(parse, input_schema),
+        KernelExpression::ParseJson(parse) => parse_json_to_df_expr_scoped(parse, input_schema),
 
         KernelExpression::Unary(u) => match u.op {
             UnaryExpressionOp::ToJson => Err(Error::unsupported(
@@ -95,9 +159,9 @@ pub fn to_df_expr(
 /// # Errors
 /// Returns an error if `expr` has another form, its field count disagrees with `output_type`, or a
 /// field cannot be lowered.
-pub(crate) fn to_df_struct_columns(
+fn struct_columns_scoped(
     expr: &KernelExpression,
-    input_schema: &StructType,
+    input_schema: &ExpressionLowering<'_>,
     output_type: &StructType,
 ) -> DeltaResult<StructColumns> {
     match expr {
@@ -116,9 +180,9 @@ pub(crate) fn to_df_struct_columns(
 /// Lowers an arithmetic binary expression (`Plus`/`Minus`/`Multiply`/`Divide`) to an
 /// `Expr::BinaryExpr`. Comparison and `IN` operators are modeled as predicates, not expressions,
 /// so they never reach this arm.
-fn binary_expr_to_df_expr(
+fn binary_expr_to_df_expr_scoped(
     binary: &BinaryExpression,
-    input_schema: &StructType,
+    input_schema: &ExpressionLowering<'_>,
 ) -> DeltaResult<DFExpr> {
     let op = match binary.op {
         BinaryExpressionOp::Plus => Operator::Plus,
@@ -126,8 +190,8 @@ fn binary_expr_to_df_expr(
         BinaryExpressionOp::Multiply => Operator::Multiply,
         BinaryExpressionOp::Divide => Operator::Divide,
     };
-    let left = to_df_expr(&binary.left, input_schema, None)?;
-    let right = to_df_expr(&binary.right, input_schema, None)?;
+    let left = to_df_expr_scoped(&binary.left, input_schema, None)?;
+    let right = to_df_expr_scoped(&binary.right, input_schema, None)?;
     Ok(binary_expr(left, op, right))
 }
 
@@ -136,9 +200,9 @@ fn binary_expr_to_df_expr(
 /// argument (every branch produces the same type). Array is type-wrapping: a known `Array<E>`
 /// target is peeled to `E` and threaded to each element (so an array of structs still gets its
 /// element schema); an unknown target leaves elements untyped.
-fn variadic_to_df_expr(
+fn variadic_to_df_expr_scoped(
     variadic: &VariadicExpression,
-    input_schema: &StructType,
+    input_schema: &ExpressionLowering<'_>,
     output_type: Option<&KernelDataType>,
 ) -> DeltaResult<DFExpr> {
     let arg_output_type = match variadic.op {
@@ -156,10 +220,15 @@ fn variadic_to_df_expr(
     let args: DeltaResult<Vec<DFExpr>> = variadic
         .exprs
         .iter()
-        .map(|e| to_df_expr(e, input_schema, arg_output_type))
+        .map(|e| to_df_expr_scoped(e, input_schema, arg_output_type))
         .collect();
     match variadic.op {
-        VariadicExpressionOp::Coalesce => Ok(coalesce(args?)),
+        VariadicExpressionOp::Coalesce => Ok(if input_schema.task_local {
+            ScalarUDF::new_from_impl(datafusion::functions::core::coalesce::CoalesceFunc::new())
+                .call(args?)
+        } else {
+            coalesce(args?)
+        }),
         VariadicExpressionOp::Array => Ok(make_array(args?)),
     }
 }
@@ -196,6 +265,7 @@ pub(crate) fn struct_null_when_not(guard: DFExpr, body: DFExpr) -> DFExpr {
 pub(crate) struct StructColumns {
     pairs: Vec<(String, DFExpr)>,
     null_guard: Option<DFExpr>,
+    task_local: bool,
 }
 
 impl StructColumns {
@@ -208,7 +278,14 @@ impl StructColumns {
             args.push(lit(name));
             args.push(value);
         }
-        let body = named_struct(args);
+        let body = if self.task_local {
+            ScalarUDF::new_from_impl(
+                datafusion::functions::core::named_struct::NamedStructFunc::new(),
+            )
+            .call(args)
+        } else {
+            named_struct(args)
+        };
         match self.null_guard {
             Some(guard) => struct_null_when_not(guard, body),
             None => body,
@@ -230,10 +307,10 @@ impl StructColumns {
 /// Lowers a struct constructor to a `named_struct(..)` value, taking field names and per-child
 /// target types from `output_type`. An optional nullability predicate nulls the whole struct where
 /// it is not true.
-fn struct_to_df_expr(
+fn struct_to_df_expr_scoped(
     fields: &[ExpressionRef],
     nullability: Option<&ExpressionRef>,
-    input_schema: &StructType,
+    input_schema: &ExpressionLowering<'_>,
     output_type: Option<&KernelDataType>,
 ) -> DeltaResult<DFExpr> {
     let target = require_struct_output(output_type, "Struct")?;
@@ -246,7 +323,7 @@ fn struct_to_df_expr(
 fn struct_columns_from_fields(
     fields: &[ExpressionRef],
     nullability: Option<&ExpressionRef>,
-    input_schema: &StructType,
+    input_schema: &ExpressionLowering<'_>,
     target: &StructType,
 ) -> DeltaResult<StructColumns> {
     if fields.len() != target.num_fields() {
@@ -258,20 +335,24 @@ fn struct_columns_from_fields(
     }
     let mut pairs = Vec::with_capacity(fields.len());
     for (child, field) in fields.iter().zip(target.fields()) {
-        let value = to_df_expr(child, input_schema, Some(field.data_type()))?;
+        let value = to_df_expr_scoped(child, input_schema, Some(field.data_type()))?;
         pairs.push((field.name().to_string(), value));
     }
     let null_guard = nullability
-        .map(|pred| to_df_expr(pred, input_schema, None))
+        .map(|pred| to_df_expr_scoped(pred, input_schema, None))
         .transpose()?;
-    Ok(StructColumns { pairs, null_guard })
+    Ok(StructColumns {
+        pairs,
+        null_guard,
+        task_local: input_schema.task_local,
+    })
 }
 
 /// Lowers a struct patch (a sparse edit of an input struct) to a `named_struct(..)` value. See
 /// [`struct_columns_from_patch`] for the emission order and the nested-patch null semantics.
-fn struct_patch_to_df_expr(
+fn struct_patch_to_df_expr_scoped(
     patch: &ExpressionStructPatch,
-    input_schema: &StructType,
+    input_schema: &ExpressionLowering<'_>,
     output_type: Option<&KernelDataType>,
 ) -> DeltaResult<DFExpr> {
     let target = require_struct_output(output_type, "StructPatch")?;
@@ -286,19 +367,19 @@ fn struct_patch_to_df_expr(
 /// source struct row, matching the evaluator's preservation of the source struct's null buffer.
 fn struct_columns_from_patch(
     patch: &ExpressionStructPatch,
-    input_schema: &StructType,
+    input_schema: &ExpressionLowering<'_>,
     target: &StructType,
 ) -> DeltaResult<StructColumns> {
     // A patch targets either the whole input struct (`input_path` is `None`), whose fields are the
     // top-level columns, or the nested struct at that path, whose fields are reached through it.
-    let (mut source_struct, mut source_expr) = (input_schema, None);
+    let (mut source_struct, mut source_expr) = (input_schema.schema, None);
     if let Some(path) = patch.input_path() {
         let KernelDataType::Struct(nested) = input_schema.field_at(path)?.data_type() else {
             return Err(Error::generic(format!(
                 "StructPatch input_path '{path}' does not resolve to a struct"
             )));
         };
-        let source = column_to_df_expr(path, input_schema)?;
+        let source = input_schema.column(path)?;
         (source_struct, source_expr) = (nested.as_ref(), Some(source));
     }
     // A nested patch must preserve its source struct's null bitmap. This predicate lets the caller
@@ -316,7 +397,7 @@ fn struct_columns_from_patch(
         let field = output_fields.next().ok_or_else(|| {
             Error::generic("StructPatch produced more fields than the output schema has")
         })?;
-        let value = to_df_expr(expr, input_schema, Some(field.data_type()))?;
+        let value = to_df_expr_scoped(expr, input_schema, Some(field.data_type()))?;
         pairs.push((field.name().to_string(), value));
         Ok(())
     };
@@ -328,7 +409,7 @@ fn struct_columns_from_patch(
             Error::generic("StructPatch produced more fields than the output schema has")
         })?;
         let value = match &source_expr {
-            Some(base) => get_field(base.clone(), name.to_string()),
+            Some(base) => input_schema.get_field(base.clone(), name.to_string()),
             None => DFExpr::Column(DFColumn::new_unqualified(name)),
         };
         pairs.push((field.name().to_string(), value));
@@ -382,7 +463,11 @@ fn struct_columns_from_patch(
         ));
     }
 
-    Ok(StructColumns { pairs, null_guard })
+    Ok(StructColumns {
+        pairs,
+        null_guard,
+        task_local: input_schema.task_local,
+    })
 }
 
 /// Lowers a `MapToStruct` (reshape a `Map<String, String>` into a struct by parsing each value into
@@ -409,13 +494,13 @@ fn struct_columns_from_patch(
 /// # Errors
 /// Returns an error when `output_type` is absent, not a struct, or has a non-primitive field, or
 /// from lowering the map expression.
-fn map_to_struct_to_df_expr(
+fn map_to_struct_to_df_expr_scoped(
     map_to_struct: &MapToStructExpression,
-    input_schema: &StructType,
+    input_schema: &ExpressionLowering<'_>,
     output_type: Option<&KernelDataType>,
 ) -> DeltaResult<DFExpr> {
     let target = require_struct_output(output_type, "MapToStruct")?;
-    let map = to_df_expr(&map_to_struct.map_expr, input_schema, None)?;
+    let map = to_df_expr_scoped(&map_to_struct.map_expr, input_schema, None)?;
 
     let mut args = Vec::with_capacity(target.num_fields() * 2);
     for field in target.fields() {
@@ -448,11 +533,11 @@ fn map_to_struct_to_df_expr(
 /// [`ParseJsonUdf`] scalar UDF, which delegates to kernel's own JSON parser. Unlike the
 /// struct-shaped arms, `ParseJson` is self-typed -- it carries its target `output_schema` -- so it
 /// takes no `output_type` and lowers its string operand untyped.
-fn parse_json_to_df_expr(
+fn parse_json_to_df_expr_scoped(
     parse: &ParseJsonExpression,
-    input_schema: &StructType,
+    input_schema: &ExpressionLowering<'_>,
 ) -> DeltaResult<DFExpr> {
-    let json = to_df_expr(&parse.json_expr, input_schema, None)?;
+    let json = to_df_expr_scoped(&parse.json_expr, input_schema, None)?;
     let udf = ScalarUDF::new_from_impl(ParseJsonUdf::try_new(parse.output_schema.clone())?);
     Ok(udf.call(vec![json]))
 }

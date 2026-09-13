@@ -16,8 +16,21 @@ use delta_kernel::expressions::{
 use delta_kernel::schema::{DataType, StructType};
 use delta_kernel::{DeltaResult, Error};
 
-use crate::expression::to_df_expr;
+use crate::expression::{to_df_expr_scoped, ExpressionLowering};
 use crate::scalar::to_df_scalar;
+
+pub fn to_df_predicate_expr(
+    pred: &KernelPredicate,
+    input_schema: &StructType,
+) -> DeltaResult<DFExpr> {
+    to_df_predicate_scoped(
+        pred,
+        &ExpressionLowering {
+            schema: input_schema,
+            task_local: false,
+        },
+    )
+}
 
 /// Converts a kernel [`Predicate`](KernelPredicate) into a boolean-valued DataFusion
 /// [`Expr`](DFExpr), checking column references against `input_schema`.
@@ -27,20 +40,20 @@ use crate::scalar::to_df_scalar;
 /// `IN` whose right side is neither a literal array nor an array-typed column. Also propagates
 /// errors from child expressions, such as an unresolved column or an interval literal (which has
 /// no Arrow equivalent).
-pub fn to_df_predicate_expr(
+pub(crate) fn to_df_predicate_scoped(
     pred: &KernelPredicate,
-    input_schema: &StructType,
+    input_schema: &ExpressionLowering<'_>,
 ) -> DeltaResult<DFExpr> {
     match pred {
-        KernelPredicate::BooleanExpression(expr) => to_df_expr(expr, input_schema, None),
+        KernelPredicate::BooleanExpression(expr) => to_df_expr_scoped(expr, input_schema, None),
         KernelPredicate::Not(inner) => {
-            let df_inner = to_df_predicate_expr(inner, input_schema)?;
+            let df_inner = to_df_predicate_scoped(inner, input_schema)?;
             Ok(DFExpr::Not(Box::new(df_inner)))
         }
-        KernelPredicate::Unary(unary) => unary_to_df_predicate_expr(unary, input_schema),
-        KernelPredicate::Binary(binary) => binary_to_df_predicate_expr(binary, input_schema),
+        KernelPredicate::Unary(unary) => unary_to_df_predicate_scoped(unary, input_schema),
+        KernelPredicate::Binary(binary) => binary_to_df_predicate_scoped(binary, input_schema),
         KernelPredicate::Junction(junction) => {
-            junction_to_df_predicate_expr(junction, input_schema)
+            junction_to_df_predicate_scoped(junction, input_schema)
         }
         KernelPredicate::Opaque(_) => Err(Error::unsupported(
             "cannot convert an engine-defined Opaque predicate",
@@ -52,32 +65,32 @@ pub fn to_df_predicate_expr(
 }
 
 /// Lowers a unary predicate.
-fn unary_to_df_predicate_expr(
+fn unary_to_df_predicate_scoped(
     unary: &KernelUnaryPredicate,
-    input_schema: &StructType,
+    input_schema: &ExpressionLowering<'_>,
 ) -> DeltaResult<DFExpr> {
-    let expr = to_df_expr(&unary.expr, input_schema, None)?;
+    let expr = to_df_expr_scoped(&unary.expr, input_schema, None)?;
     match unary.op {
         KernelUnaryPredicateOp::IsNull => Ok(DFExpr::IsNull(Box::new(expr))),
     }
 }
 
 /// Lowers a binary predicate.
-fn binary_to_df_predicate_expr(
+fn binary_to_df_predicate_scoped(
     binary: &KernelBinaryPredicate,
-    input_schema: &StructType,
+    input_schema: &ExpressionLowering<'_>,
 ) -> DeltaResult<DFExpr> {
     let op = match binary.op {
         KernelBinaryPredicateOp::In => {
-            return in_to_df_predicate_expr(&binary.left, &binary.right, input_schema)
+            return in_to_df_predicate_scoped(&binary.left, &binary.right, input_schema)
         }
         KernelBinaryPredicateOp::Equal => Operator::Eq,
         KernelBinaryPredicateOp::LessThan => Operator::Lt,
         KernelBinaryPredicateOp::GreaterThan => Operator::Gt,
         KernelBinaryPredicateOp::Distinct => Operator::IsDistinctFrom,
     };
-    let left = to_df_expr(&binary.left, input_schema, None)?;
-    let right = to_df_expr(&binary.right, input_schema, None)?;
+    let left = to_df_expr_scoped(&binary.left, input_schema, None)?;
+    let right = to_df_expr_scoped(&binary.right, input_schema, None)?;
     Ok(binary_expr(left, op, right))
 }
 
@@ -106,10 +119,10 @@ fn binary_to_df_predicate_expr(
 /// # Errors
 /// Returns [`Error::unsupported`] if the left operand is not a literal, or the right operand is
 /// neither a literal array nor an array-typed column.
-fn in_to_df_predicate_expr(
+fn in_to_df_predicate_scoped(
     value: &KernelExpression,
     list: &KernelExpression,
-    input_schema: &StructType,
+    input_schema: &ExpressionLowering<'_>,
 ) -> DeltaResult<DFExpr> {
     // Kernel's Arrow evaluator accepts `IN` only with a literal left operand (a column left
     // operand errors), so reject anything else to match it exactly.
@@ -118,7 +131,7 @@ fn in_to_df_predicate_expr(
             "converting an IN predicate requires a literal left-hand side",
         ));
     };
-    let value = to_df_expr(value, input_schema, None)?;
+    let value = to_df_expr_scoped(value, input_schema, None)?;
     let membership =
         match list {
             KernelExpression::Literal(KernelScalar::Array(array)) => in_list_expr(value, array)?,
@@ -154,26 +167,29 @@ fn array_has_expr(
     value: DFExpr,
     column: &KernelExpression,
     name: &KernelColumnName,
-    input_schema: &StructType,
+    input_schema: &ExpressionLowering<'_>,
 ) -> DeltaResult<DFExpr> {
     let DataType::Array(_) = input_schema.field_at(name)?.data_type else {
         return Err(Error::unsupported(
             "converting an IN predicate against a column requires an array-typed column",
         ));
     };
-    Ok(array_has(to_df_expr(column, input_schema, None)?, value))
+    Ok(array_has(
+        to_df_expr_scoped(column, input_schema, None)?,
+        value,
+    ))
 }
 
 /// Lowers a junction (`And`/`Or`) by converting each child and combining them with DataFusion's
 /// left-associative [`conjunction`]/[`disjunction`] helpers.
-fn junction_to_df_predicate_expr(
+fn junction_to_df_predicate_scoped(
     junction: &KernelJunctionPredicate,
-    input_schema: &StructType,
+    input_schema: &ExpressionLowering<'_>,
 ) -> DeltaResult<DFExpr> {
     let preds: DeltaResult<Vec<DFExpr>> = junction
         .preds
         .iter()
-        .map(|pred| to_df_predicate_expr(pred, input_schema))
+        .map(|pred| to_df_predicate_scoped(pred, input_schema))
         .collect();
     // An empty junction lowers `AND` to `true` and `OR` to `false`, keeping kernel semantics.
     match junction.op {

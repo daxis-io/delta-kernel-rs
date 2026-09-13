@@ -14,9 +14,12 @@ use delta_kernel::engine::arrow_conversion::TryFromKernel as _;
 use delta_kernel::engine::arrow_data::EngineDataArrowExt;
 use delta_kernel::object_store::local::LocalFileSystem;
 use delta_kernel::object_store::ObjectStore;
-use delta_kernel::parquet::arrow::async_reader::{
-    ParquetObjectReader, ParquetRecordBatchStreamBuilder,
-};
+#[allow(
+    deprecated,
+    reason = "preserve exact range and batched reads on the pinned native reader"
+)]
+use delta_kernel::parquet::arrow::async_reader::ParquetObjectReader;
+use delta_kernel::parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder;
 use delta_kernel::{DeltaResult, Snapshot};
 use futures::stream::TryStreamExt;
 use futures::StreamExt;
@@ -36,6 +39,10 @@ async fn read_expected(path: &Path) -> DeltaResult<RecordBatch> {
     for meta in files.into_iter() {
         if let Some(ext) = meta.location.extension() {
             if ext == "parquet" {
+                #[allow(
+                    deprecated,
+                    reason = "preserve exact range and batched reads on the pinned native reader"
+                )]
                 let reader = ParquetObjectReader::new(store.clone(), meta.location);
                 let builder = ParquetRecordBatchStreamBuilder::new(reader).await?;
                 if schema.is_none() {

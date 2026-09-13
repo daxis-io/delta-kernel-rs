@@ -81,6 +81,11 @@ pub struct Snapshot {
     crc: SnapshotCrc,
     /// Best-effort "confirmed latest at build time" flag. See [`Snapshot::built_as_latest`].
     built_as_latest: bool,
+    /// Immutable discovery provenance retained by the concrete JSON operation tasks.
+    #[cfg(feature = "operation-tasks")]
+    pub(crate) log_identity_manifest: Option<Arc<crate::tasks::LogIdentityManifest>>,
+    #[cfg(feature = "operation-tasks")]
+    pub(crate) json_task_retained_bytes: usize,
 }
 
 impl PartialEq for Snapshot {
@@ -184,6 +189,10 @@ impl Snapshot {
             table_configuration,
             crc,
             built_as_latest,
+            #[cfg(feature = "operation-tasks")]
+            log_identity_manifest: None,
+            #[cfg(feature = "operation-tasks")]
+            json_task_retained_bytes: 0,
         })
     }
 

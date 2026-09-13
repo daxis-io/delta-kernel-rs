@@ -202,6 +202,23 @@ impl<'a> MapItem<'a> {
         self.offsets.clone().map(move |idx| keys.value(idx))
     }
 
+    /// Borrow every stored entry, including duplicate keys and null values, so
+    /// task admission can count the same source slots as `materialize`.
+    pub(crate) fn entries(&self) -> impl Iterator<Item = (&'a str, Option<&'a str>)> + 'a {
+        let keys = self.keys;
+        let values = self.values;
+        self.offsets.clone().map(move |index| {
+            (
+                keys.value(index),
+                values.is_valid(index).then(|| values.value(index)),
+            )
+        })
+    }
+
+    pub(crate) fn entry_count(&self) -> usize {
+        self.offsets.len()
+    }
+
     pub fn materialize(&self) -> HashMap<String, String> {
         let mut ret = HashMap::with_capacity(self.offsets.len());
         for idx in self.offsets.clone() {

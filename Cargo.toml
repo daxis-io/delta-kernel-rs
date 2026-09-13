@@ -33,3 +33,6 @@ repository = "https://github.com/delta-io/delta-kernel-rs"
 readme = "README.md"
 rust-version = "1.88"
 version = "0.28.0"
+
+# Narrow Phase D qualification-only local dependency overlay.
+[patch.crates-io]

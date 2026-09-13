@@ -92,6 +92,8 @@ pub fn serialize_partition_value(value: &Scalar) -> DeltaResult<Option<String>> 
         Scalar::Date(days) => Ok(Some(format_date(*days)?)),
         Scalar::Timestamp(us) => Ok(Some(format_timestamp(*us)?)),
         Scalar::TimestampNtz(us) => Ok(Some(format_timestamp_ntz(*us)?)),
+        #[cfg(feature = "nanosecond-timestamps")]
+        Scalar::TimestampNanos(ns) => Ok(Some(format_timestamp_nanos(*ns)?)),
         Scalar::IntervalYearMonth(months) => Ok(Some(format_year_month_interval(*months))),
         Scalar::IntervalDayTime(micros) => Ok(Some(format_day_time_interval(*micros))),
         Scalar::Decimal(d) => Ok(Some(format_decimal(d))),
@@ -639,4 +641,18 @@ mod tests {
         .unwrap();
         assert!(serialize_partition_value(&Scalar::Map(data)).is_err());
     }
+}
+
+#[cfg(feature = "nanosecond-timestamps")]
+fn format_timestamp_nanos(nanos: i64) -> DeltaResult<String> {
+    DateTime::from_timestamp(
+        nanos.div_euclid(1_000_000_000),
+        nanos.rem_euclid(1_000_000_000) as u32,
+    )
+    .ok_or_else(|| {
+        Error::generic(format!(
+            "timetamps value {nanos} nanoseconds from epoch is out of range"
+        ))
+    })
+    .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S%.9fZ").to_string())
 }

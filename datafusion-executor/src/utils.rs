@@ -25,13 +25,31 @@ pub(crate) fn column_to_df_expr<E>(
     name: &KernelColumnName,
     input_schema: &impl ColumnResolver<Error = E>,
 ) -> Result<DFExpr, E> {
+    column_to_df_expr_scoped(name, input_schema, false)
+}
+
+pub(crate) fn column_to_df_expr_scoped<E>(
+    name: &KernelColumnName,
+    input_schema: &impl ColumnResolver<Error = E>,
+    task_local: bool,
+) -> Result<DFExpr, E> {
     let root = DFExpr::Column(input_schema.resolve_column(name)?);
     let field_names = Vec::from_iter(name.iter().skip(1).map(lit));
     // A bare column stays a bare column; only nested access wraps it in a `get_field` call.
     if field_names.is_empty() {
         Ok(root)
     } else {
-        Ok(get_field_path(root, field_names))
+        if task_local {
+            let mut args = Vec::with_capacity(field_names.len() + 1);
+            args.push(root);
+            args.extend(field_names);
+            Ok(datafusion::logical_expr::ScalarUDF::new_from_impl(
+                datafusion::functions::core::getfield::GetFieldFunc::new(),
+            )
+            .call(args))
+        } else {
+            Ok(get_field_path(root, field_names))
+        }
     }
 }
 

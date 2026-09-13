@@ -38,7 +38,13 @@ mod column_mapping;
 #[cfg(feature = "geo-type-in-dev")]
 mod geospatial;
 mod iceberg_compat;
+#[cfg(feature = "nanosecond-timestamps")]
+mod timestamp_nanos;
 mod timestamp_ntz;
+#[cfg(feature = "nanosecond-timestamps")]
+pub(crate) use timestamp_nanos::{
+    schema_contains_timestamp_nanos, validate_timestamp_nanos_feature_support,
+};
 
 /// Minimum reader/writer protocol version that the kernel can handle.
 pub const MIN_VALID_RW_VERSION: i32 = 1;
@@ -147,6 +153,11 @@ pub(crate) enum TableFeature {
     ColumnMapping,
     /// Deletion vectors for merge, update, delete
     DeletionVectors,
+    /// UTC timestamps with nanosecond precision.
+    #[cfg(feature = "nanosecond-timestamps")]
+    #[strum(serialize = "timestampNanos")]
+    #[serde(rename = "timestampNanos")]
+    TimestampNanos,
     /// Timestamps without timezone support. The canonical protocol feature name is `timestampNtz`.
     ///
     /// `timestampWithoutTimezone` is not a Delta protocol feature name, but some existing tables
@@ -557,6 +568,15 @@ static DELETION_VECTORS_INFO: FeatureInfo = FeatureInfo {
     }),
 };
 
+#[cfg(feature = "nanosecond-timestamps")]
+static TIMESTAMP_NANOSECOND_INFO: FeatureInfo = FeatureInfo {
+    feature_type: FeatureType::ReaderWriter,
+    min_legacy_version: None,
+    feature_requirements: &[],
+    kernel_support: KernelSupport::Supported,
+    enablement_check: EnablementCheck::AlwaysIfSupported,
+};
+
 static TIMESTAMP_WITHOUT_TIMEZONE_INFO: FeatureInfo = FeatureInfo {
     feature_type: FeatureType::ReaderWriter,
     min_legacy_version: None,
@@ -731,6 +751,8 @@ impl TableFeature {
             | TableFeature::MaterializePartitionColumns => FeatureType::WriterOnly,
             TableFeature::AllowColumnDefaults => FeatureType::WriterOnly,
             TableFeature::Unknown(_) => FeatureType::Unknown,
+            #[cfg(feature = "nanosecond-timestamps")]
+            TableFeature::TimestampNanos => FeatureType::ReaderWriter,
         }
     }
 
@@ -773,6 +795,8 @@ impl TableFeature {
             TableFeature::ColumnMapping => &COLUMN_MAPPING_INFO,
             TableFeature::DeletionVectors => &DELETION_VECTORS_INFO,
             TableFeature::TimestampWithoutTimezone => &TIMESTAMP_WITHOUT_TIMEZONE_INFO,
+            #[cfg(feature = "nanosecond-timestamps")]
+            TableFeature::TimestampNanos => &TIMESTAMP_NANOSECOND_INFO,
             TableFeature::TypeWidening => &TYPE_WIDENING_INFO,
             TableFeature::TypeWideningPreview => &TYPE_WIDENING_PREVIEW_INFO,
             TableFeature::V2Checkpoint => &V2_CHECKPOINT_INFO,
@@ -1121,6 +1145,8 @@ mod tests {
                 TableFeature::ColumnMapping => "columnMapping",
                 TableFeature::DeletionVectors => "deletionVectors",
                 TableFeature::TimestampWithoutTimezone => "timestampNtz",
+                #[cfg(feature = "nanosecond-timestamps")]
+                TableFeature::TimestampNanos => "timestampNanos",
                 TableFeature::TypeWidening => "typeWidening",
                 TableFeature::TypeWideningPreview => "typeWidening-preview",
                 TableFeature::V2Checkpoint => "v2Checkpoint",

@@ -7,6 +7,14 @@
 mod accounting;
 mod driver;
 mod evaluation;
+mod json_materialization;
+mod json_producer_shape;
+mod json_scan;
+mod json_scan_allocation;
+mod json_schema_shape;
+mod json_snapshot;
+mod json_url_allocation;
+mod json_visitor_allocation;
 #[cfg(all(
     feature = "default-engine-base",
     feature = "arrow-59",
@@ -14,6 +22,7 @@ mod evaluation;
     not(all(target_arch = "wasm32", target_os = "unknown"))
 ))]
 mod local_io;
+mod log_manifest;
 mod machine;
 mod plan_admission;
 mod plan_shape;
@@ -23,16 +32,19 @@ use std::error::Error as StdError;
 use std::fmt;
 
 pub use accounting::{
-    FooterLimits, Resource, ResourceUsage, TaskAccounting, TaskLimits, TaskUsage,
+    FooterLimits, PendingWork, Resource, ResourceUsage, TaskAccounting, TaskLimits, TaskUsage,
 };
 pub use driver::{
-    AdmittedEvaluationSource, AdmittedFooter, AdmittedHead, AdmittedIoSource, AdmittedListingPage,
-    AdmittedRead, EvaluationDriver, IoUsage, ObjectIdentity, OperationDriver,
+    AdmittedAsyncEffect, AdmittedAsyncHost, AdmittedEvaluationSource, AdmittedFooter, AdmittedHead,
+    AdmittedIoEffect, AdmittedIoSource, AdmittedListingPage, AdmittedRead, AsyncOperationDriver,
+    EvaluationDriver, IoUsage, ObjectIdentity, OperationDriver,
 };
 pub use evaluation::{
     AccountedEngineData, EvaluationLimits, EvaluationPage, EvaluationPageLimits, EvaluationReader,
     EvaluationUsage,
 };
+pub use json_scan::ScanMetadataTask;
+pub use json_snapshot::SnapshotLoadTask;
 #[cfg(all(
     feature = "default-engine-base",
     feature = "arrow-59",
@@ -40,6 +52,7 @@ pub use evaluation::{
     not(all(target_arch = "wasm32", target_os = "unknown"))
 ))]
 pub use local_io::LocalFileIoSource;
+pub use log_manifest::LogIdentityManifest;
 pub use machine::{TaskAction, TaskMachine, TaskState, TaskStatus};
 pub use plan_admission::{AdmittedPlan, PlanAdmissionError, PlanMetadataEntry};
 pub use plan_shape::{PlanShape, PlanShapeError};
@@ -185,6 +198,8 @@ impl StdError for OperationFailure {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TaskProtocolError {
+    /// This synchronous task does not expose borrowed host-work admission.
+    HostWorkUnavailable,
     /// Limits cannot represent a progressing, bounded page.
     InvalidLimits,
     /// The task has not been started.
@@ -208,6 +223,7 @@ pub enum TaskProtocolError {
 impl fmt::Display for TaskProtocolError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::HostWorkUnavailable => f.write_str("task does not expose host work accounting"),
             Self::InvalidLimits => f.write_str("invalid task limits"),
             Self::NotStarted => f.write_str("task not started"),
             Self::AlreadyStarted => f.write_str("task already started"),

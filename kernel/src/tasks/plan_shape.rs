@@ -7,7 +7,7 @@ use crate::plans::ir::nodes::{Agg, Operator, ScanFile};
 use crate::plans::ir::plan::Plan;
 use crate::schema::{ArrayType, DataType, MapType, PrimitiveType, StructField, StructType};
 
-// The largest field number in the plan wire grammar is 19 (two tag bytes). A protobuf
+// The largest field number in the plan wire grammar is 20 (two tag bytes). A protobuf
 // varint or length prefix uses at most ten bytes. Charging both also bounds fixed-width fields.
 const FIELD: usize = 2 + 10;
 pub(super) const FIELD_BOUND: usize = FIELD;
@@ -32,6 +32,64 @@ pub struct PlanShape {
 }
 
 impl PlanShape {
+    // Only the two closed JSON producers call this after their owner-local preflight. This does
+    // not broaden check/check_literals or admit public metadata/struct-patch maps. Their fixed
+    // maps were built internally under the producer envelope, never supplied by a caller.
+    pub(super) fn json_log_producer_shape(
+        plan: &Plan,
+        encoded_bytes: usize,
+        work_units: usize,
+        limits: &TaskLimits,
+    ) -> Result<Self, PlanShapeError> {
+        let mut depths = [0usize; 8];
+        if plan.nodes.is_empty() || plan.nodes.len() > depths.len() {
+            return Err(PlanShapeError::Empty);
+        }
+        let mut depth = 0;
+        for (index, node) in plan.nodes.iter().enumerate() {
+            if !matches!(
+                node.op,
+                Operator::ScanJson(_)
+                    | Operator::Project(_)
+                    | Operator::Filter(_)
+                    | Operator::Aggregate(_)
+                    | Operator::UnionAll(_)
+                    | Operator::SemiJoin(_)
+            ) {
+                return Err(PlanShapeError::UnsupportedExpression);
+            }
+            let mut node_depth = 1;
+            for input in &node.inputs {
+                if *input >= index {
+                    return Err(PlanShapeError::InvalidInput { node: index });
+                }
+                node_depth = node_depth.max(depths[*input] + 1);
+            }
+            depths[index] = node_depth;
+            depth = depth.max(node_depth);
+        }
+        for (resource, observed) in [
+            (Resource::PlanNodes, plan.nodes.len()),
+            (Resource::PlanDepth, depth),
+            (Resource::PlanEncodedBytes, encoded_bytes),
+            (Resource::WorkUnits, work_units),
+        ] {
+            if observed > limits.limit(resource) {
+                return Err(PlanShapeError::ResourceExhausted(ResourceExhausted {
+                    resource,
+                    limit: limits.limit(resource),
+                    observed,
+                }));
+            }
+        }
+        Ok(Self {
+            nodes: plan.nodes.len(),
+            depth,
+            encoded_bytes,
+            work_units,
+        })
+    }
+
     pub(super) fn fixed_values(
         field_name: &str,
         data_type: &DataType,
@@ -485,6 +543,8 @@ impl Walk<'_> {
             DataType::Primitive(p) => {
                 self.add(FIELD)?; // PrimitiveType
                 match p {
+                    #[cfg(feature = "nanosecond-timestamps")]
+                    PrimitiveType::TimestampNanos => self.add(FIELD),
                     PrimitiveType::Decimal(d) => {
                         self.decimal_type(d)?;
                         self.add(FIELD * 3)
@@ -646,6 +706,8 @@ impl Walk<'_> {
                 }
                 Ok(())
             }
+            #[cfg(feature = "nanosecond-timestamps")]
+            Scalar::TimestampNanos(_) => self.add(FIELD),
             Scalar::Integer(_)
             | Scalar::Long(_)
             | Scalar::Short(_)
@@ -721,6 +783,8 @@ impl Walk<'_> {
             Scalar::Boolean(_) => DataType::BOOLEAN,
             Scalar::Timestamp(_) => DataType::TIMESTAMP,
             Scalar::TimestampNtz(_) => DataType::TIMESTAMP_NTZ,
+            #[cfg(feature = "nanosecond-timestamps")]
+            Scalar::TimestampNanos(_) => DataType::TIMESTAMP_NANOS,
             Scalar::IntervalYearMonth(_) => DataType::INTERVAL_YEAR_MONTH,
             Scalar::IntervalDayTime(_) => DataType::INTERVAL_DAY_TIME,
             Scalar::Date(_) => DataType::DATE,

@@ -263,6 +263,15 @@ impl<S: TaskState> TaskMachine<S> {
 }
 
 impl<S: TaskState> OperationTask for TaskMachine<S> {
+    fn pending_work(&self) -> Result<super::PendingWork<'_>, TaskProtocolError> {
+        self.require_running()?;
+        let key = self.pending_key().ok_or(TaskProtocolError::WrongKey)?;
+        Ok(super::PendingWork {
+            key,
+            accounting: &self.accounting,
+        })
+    }
+
     type Output = S::Output;
 
     fn start(&mut self, cpu: CpuSlice) -> Result<TaskStep<Self::Output>, TaskProtocolError> {

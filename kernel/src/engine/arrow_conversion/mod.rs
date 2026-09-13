@@ -367,6 +367,11 @@ impl TryFromKernel<&DataType> for ArrowDataType {
                         TimeUnit::Microsecond,
                         Some("UTC".into()),
                     )),
+                    #[cfg(feature = "nanosecond-timestamps")]
+                    PrimitiveType::TimestampNanos => Ok(ArrowDataType::Timestamp(
+                        TimeUnit::Nanosecond,
+                        Some("UTC".into()),
+                    )),
                     PrimitiveType::TimestampNtz => {
                         Ok(ArrowDataType::Timestamp(TimeUnit::Microsecond, None))
                     }
@@ -594,7 +599,14 @@ impl TryFromArrow<&ArrowDataType> for DataType {
             ArrowDataType::Timestamp(TimeUnit::Nanosecond, Some(tz))
                 if tz.eq_ignore_ascii_case("utc") =>
             {
-                Ok(DataType::TIMESTAMP)
+                #[cfg(feature = "nanosecond-timestamps")]
+                {
+                    Ok(DataType::TIMESTAMP_NANOS)
+                }
+                #[cfg(not(feature = "nanosecond-timestamps"))]
+                {
+                    Ok(DataType::TIMESTAMP)
+                }
             }
             // Millisecond is coarser than the kernel's microsecond logical timestamp, so
             // mapping it onto the logical type is a lossless upscale (values are rescaled

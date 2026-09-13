@@ -168,6 +168,9 @@ pub enum ParseIntervalError {
     /// Unknown unit
     #[error("Unknown interval unit '{0}'")]
     UnknownUnit(String),
+    /// The unit conversion cannot be represented by Duration seconds.
+    #[error("Interval '{0}' overflows seconds")]
+    Overflow(String),
 }
 
 /// This is effectively a simpler version of spark's `CalendarInterval` parser. See spark's
@@ -210,10 +213,26 @@ fn parse_interval_impl(value: &str) -> Result<Duration, ParseIntervalError> {
         "microsecond" | "microseconds" => Duration::from_micros(number),
         "millisecond" | "milliseconds" => Duration::from_millis(number),
         "second" | "seconds" => Duration::from_secs(number),
-        "minute" | "minutes" => Duration::from_secs(number * SECONDS_PER_MINUTE),
-        "hour" | "hours" => Duration::from_secs(number * SECONDS_PER_HOUR),
-        "day" | "days" => Duration::from_secs(number * SECONDS_PER_DAY),
-        "week" | "weeks" => Duration::from_secs(number * SECONDS_PER_WEEK),
+        "minute" | "minutes" => Duration::from_secs(
+            number
+                .checked_mul(SECONDS_PER_MINUTE)
+                .ok_or_else(|| ParseIntervalError::Overflow(value.to_string()))?,
+        ),
+        "hour" | "hours" => Duration::from_secs(
+            number
+                .checked_mul(SECONDS_PER_HOUR)
+                .ok_or_else(|| ParseIntervalError::Overflow(value.to_string()))?,
+        ),
+        "day" | "days" => Duration::from_secs(
+            number
+                .checked_mul(SECONDS_PER_DAY)
+                .ok_or_else(|| ParseIntervalError::Overflow(value.to_string()))?,
+        ),
+        "week" | "weeks" => Duration::from_secs(
+            number
+                .checked_mul(SECONDS_PER_WEEK)
+                .ok_or_else(|| ParseIntervalError::Overflow(value.to_string()))?,
+        ),
         unit @ ("month" | "months") => {
             return Err(ParseIntervalError::UnsupportedInterval(unit.to_string()));
         }
@@ -457,5 +476,21 @@ mod tests {
         // Present: returns the parsed value as-is.
         let props = TableProperties::from([(PARQUET_COMPRESSION_CODEC, "snappy")]);
         assert_eq!(props.compression_codec_or_default(), Snappy);
+    }
+}
+
+#[cfg(test)]
+mod interval_overflow_regression {
+    use super::*;
+    #[test]
+    fn parse_interval_large_units_reject_overflow_without_panicking() {
+        for unit in ["minutes", "hours", "days", "weeks"] {
+            let text = format!("interval {} {unit}", i64::MAX);
+            assert_eq!(parse_interval(&text), None);
+        }
+        assert_eq!(
+            parse_interval("interval 1 week"),
+            Some(Duration::from_secs(SECONDS_PER_WEEK))
+        );
     }
 }

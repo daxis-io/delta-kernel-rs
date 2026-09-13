@@ -560,6 +560,7 @@ fn visit_expression_scalar(
     scalar: &Scalar,
     sibling_list_id: usize,
 ) {
+    #[allow(unreachable_patterns)]
     match scalar {
         Scalar::Integer(val) => call!(visitor, visit_literal_int, sibling_list_id, *val),
         Scalar::Long(val) => call!(visitor, visit_literal_long, sibling_list_id, *val),
@@ -631,6 +632,7 @@ fn visit_expression_scalar(
         }
         Scalar::Array(array) => visit_expression_array(visitor, array, sibling_list_id),
         Scalar::Map(map_data) => visit_expression_map(visitor, map_data, sibling_list_id),
+        _ => visit_unknown(visitor, sibling_list_id, "unsupported scalar type"),
     }
 }
 

@@ -39,7 +39,7 @@ use crate::{
 
 mod crc_replay;
 mod domain_metadata_replay;
-mod protocol_metadata_replay;
+pub(crate) mod protocol_metadata_replay;
 
 pub(crate) use domain_metadata_replay::DomainMetadataMap;
 

@@ -1,0 +1,1 @@
+{"metaData":{"id":"ce0ed0d0-0000-4000-8000-000000000001","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"added_at_v1\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":[],"configuration":{},"createdTime":0}}

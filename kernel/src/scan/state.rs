@@ -166,6 +166,10 @@ impl ScanMetadata {
         Ok(visitor.context)
     }
 }
+// Shared fixed visitor layout; operation-task preflight borrows the same leaves.
+pub(crate) static SCAN_ROW_LEAVES: LazyLock<ColumnNamesAndTypes> =
+    LazyLock::new(|| SCAN_ROW_SCHEMA.leaves(None));
+
 // add some visitor magic for engines
 struct ScanFileVisitor<'a, T> {
     callback: ScanCallback<T>,
@@ -174,9 +178,7 @@ struct ScanFileVisitor<'a, T> {
 }
 impl<T> FilteredRowVisitor for ScanFileVisitor<'_, T> {
     fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
-        static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> =
-            LazyLock::new(|| SCAN_ROW_SCHEMA.leaves(None));
-        NAMES_AND_TYPES.as_ref()
+        SCAN_ROW_LEAVES.as_ref()
     }
     fn visit_filtered<'a>(
         &mut self,

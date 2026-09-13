@@ -8,9 +8,9 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use delta_kernel::object_store::path::Path;
 use delta_kernel::object_store::{
-    Attributes, CopyOptions, Error as ObjectStoreError, GetOptions, GetRange, GetResult,
-    GetResultPayload, ListResult, MultipartUpload, ObjectMeta, ObjectStore, PutMode,
-    PutMultipartOptions, PutOptions, PutPayload, PutResult, Result as ObjectStoreResult,
+    new_get_result, new_put_result, Attributes, CopyOptions, Error as ObjectStoreError, GetOptions,
+    GetRange, GetResult, GetResultPayload, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
+    PutMode, PutMultipartOptions, PutOptions, PutPayload, PutResult, Result as ObjectStoreResult,
 };
 use futures::stream::BoxStream;
 use futures::StreamExt as _;
@@ -427,10 +427,7 @@ fn not_supported(op: &str) -> ObjectStoreError {
 
 /// A successful PUT result; this store surfaces no etag or version.
 fn put_result() -> PutResult {
-    PutResult {
-        e_tag: None,
-        version: None,
-    }
+    new_put_result(None, None)
 }
 
 /// Outcome of reading a file back to compare against bytes we tried to write.
@@ -500,12 +497,12 @@ impl ObjectStore for RestObjectStore {
             let meta = self.head_meta(path_str, location).await?;
             options.check_preconditions(&meta)?;
             let size = meta.size;
-            return Ok(GetResult {
-                payload: GetResultPayload::Stream(Box::pin(futures::stream::empty())),
-                range: 0..size,
+            return Ok(new_get_result(
+                GetResultPayload::Stream(Box::pin(futures::stream::empty())),
                 meta,
-                attributes: Attributes::new(),
-            });
+                0..size,
+                Attributes::new(),
+            ));
         }
 
         let range_header = options.range.as_ref().map(get_range_to_header);
@@ -565,12 +562,12 @@ impl ObjectStore for RestObjectStore {
         options.check_preconditions(&meta)?;
 
         let stream = Box::pin(futures::stream::once(futures::future::ready(Ok(content))));
-        Ok(GetResult {
-            payload: GetResultPayload::Stream(stream),
+        Ok(new_get_result(
+            GetResultPayload::Stream(stream),
             meta,
             range,
-            attributes: Attributes::new(),
-        })
+            Attributes::new(),
+        ))
     }
 
     async fn put_opts(

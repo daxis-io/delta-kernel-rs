@@ -27,6 +27,7 @@ use delta_kernel::{DeltaResult, Error};
 /// representation (e.g. a shredded variant); or if building the backing Arrow array for a nested
 /// container otherwise fails.
 pub fn to_df_scalar(scalar: &KernelScalar) -> DeltaResult<DFScalarValue> {
+    #[allow(unreachable_patterns)]
     Ok(match scalar {
         KernelScalar::Integer(i) => DFScalarValue::Int32(Some(*i)),
         KernelScalar::Long(i) => DFScalarValue::Int64(Some(*i)),
@@ -55,6 +56,24 @@ pub fn to_df_scalar(scalar: &KernelScalar) -> DeltaResult<DFScalarValue> {
             ))
         }
         KernelScalar::Null(data_type) => datatype_to_df_null_scalar(data_type)?,
+        // Dependency feature unification can enable this type without a local feature flag.
+        other => {
+            let ty: ArrowDataType = (&other.data_type()).try_into_arrow()?;
+            if matches!(
+                ty,
+                ArrowDataType::Timestamp(
+                    datafusion::arrow::datatypes::TimeUnit::Nanosecond,
+                    Some(_)
+                )
+            ) {
+                DFScalarValue::try_from_array(other.to_array(1)?.as_ref(), 0)
+                    .map_err(Error::generic_err)?
+            } else {
+                return Err(Error::unsupported(
+                    "scalar is not supported in the DataFusion executor",
+                ));
+            }
+        }
     })
 }
 

@@ -547,6 +547,8 @@ impl From<&Scalar> for proto_expr::Scalar {
             Scalar::Boolean(v) => Value::Boolean(*v),
             Scalar::Timestamp(v) => Value::Timestamp(*v),
             Scalar::TimestampNtz(v) => Value::TimestampNtz(*v),
+            #[cfg(feature = "nanosecond-timestamps")]
+            Scalar::TimestampNanos(v) => Value::TimestampNanos(*v),
             Scalar::IntervalYearMonth(v) => Value::IntervalYearMonth(*v),
             Scalar::IntervalDayTime(v) => Value::IntervalDayTime(*v),
             Scalar::Date(v) => Value::Date(*v),
@@ -636,6 +638,10 @@ impl From<&PrimitiveType> for proto_schema::PrimitiveType {
             PrimitiveType::Date => PrimitiveTypeKind::Simple(Simple::Date as i32),
             PrimitiveType::Timestamp => PrimitiveTypeKind::Simple(Simple::Timestamp as i32),
             PrimitiveType::TimestampNtz => PrimitiveTypeKind::Simple(Simple::TimestampNtz as i32),
+            #[cfg(feature = "nanosecond-timestamps")]
+            PrimitiveType::TimestampNanos => {
+                PrimitiveTypeKind::Simple(Simple::TimestampNanos as i32)
+            }
             PrimitiveType::Decimal(decimal) => PrimitiveTypeKind::Decimal((*decimal).into()),
             #[cfg(feature = "geo-type-in-dev")]
             PrimitiveType::Geometry(geometry) => {
@@ -830,6 +836,14 @@ impl TryFrom<proto_schema::PrimitiveType> for PrimitiveType {
                     Simple::Date => PrimitiveType::Date,
                     Simple::Timestamp => PrimitiveType::Timestamp,
                     Simple::TimestampNtz => PrimitiveType::TimestampNtz,
+                    #[cfg(feature = "nanosecond-timestamps")]
+                    Simple::TimestampNanos => PrimitiveType::TimestampNanos,
+                    #[cfg(not(feature = "nanosecond-timestamps"))]
+                    Simple::TimestampNanos => {
+                        return Err(Error::unsupported(
+                            "timestamp_nanos requires nanosecond-timestamps",
+                        ))
+                    }
                     Simple::Void => PrimitiveType::Void,
                     Simple::IntervalYearMonth => PrimitiveType::IntervalYearMonth,
                     Simple::IntervalDayTime => PrimitiveType::IntervalDayTime,
@@ -1919,6 +1933,7 @@ mod tests {
             Value::Boolean(_) => "boolean",
             Value::Timestamp(_) => "timestamp",
             Value::TimestampNtz(_) => "timestamp_ntz",
+            Value::TimestampNanos(_) => "timestamp_nanos",
             Value::IntervalYearMonth(_) => "interval_year_month",
             Value::IntervalDayTime(_) => "interval_day_time",
             Value::Date(_) => "date",

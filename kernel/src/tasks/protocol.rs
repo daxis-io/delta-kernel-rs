@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{
     AdmittedPlan, EvaluationLimits, EvaluationPage, EvaluationPageLimits, FooterLimits,
-    OperationFailure, TaskProtocolError,
+    ObjectIdentity, OperationFailure, TaskProtocolError,
 };
 use crate::ParquetFooter;
 
@@ -145,7 +145,12 @@ impl CpuSlice {
 ///
 /// Producers bound discovery and allocation before creating descriptors. Consumers account the
 /// actual container and string capacities before retaining a page. Backend version and identity
-/// validation remain the driver's responsibility at the admitted I/O boundary.
+/// validation remain the driver's responsibility at the admitted I/O boundary. The identity
+/// must describe the same observation as the size and modification time; providers that cannot
+/// supply a stable identity must fail discovery instead of inventing a value.
+/// Migration from the Phase C experimental `operation-tasks` API requires a stable
+/// observed `ObjectIdentity` in descriptor literals. It must describe the discovered
+/// object; callers must not fabricate an identity to bypass admitted discovery.
 pub struct FileDescriptor {
     /// The full object path, ordered using the storage path ordering.
     pub path: String,
@@ -153,6 +158,8 @@ pub struct FileDescriptor {
     pub size: u64,
     /// Last modification time in milliseconds since the Unix epoch.
     pub modification_time: i64,
+    /// Stable object version observed during discovery.
+    pub identity: ObjectIdentity,
 }
 
 /// Read-only work transferred to a driver after protocol admission.
@@ -306,6 +313,12 @@ pub enum TaskStep<T> {
 /// handlers, iterators, futures, evaluation execution and cancellation mechanisms. Payload
 /// construction requires producer admission; protocol validation cannot establish it afterward.
 pub trait OperationTask {
+    /// Borrows this task's existing work ledger for its pending request only.
+    /// Async drivers verify the key before allowing a host to use the loan.
+    fn pending_work(&self) -> Result<super::PendingWork<'_>, TaskProtocolError> {
+        Err(TaskProtocolError::HostWorkUnavailable)
+    }
+
     /// The output transferred exactly once on successful completion.
     type Output;
 

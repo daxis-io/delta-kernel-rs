@@ -439,11 +439,22 @@ impl Metadata {
     /// JSON decoding failures.
     #[internal_api]
     pub(crate) fn parse_schema(&self) -> DeltaResult<StructType> {
+        self.parse_schema_impl(true)
+    }
+
+    /// The task preflights parser/error owners; an environment-dependent native
+    /// backtrace is not part of that envelope. Parsing and classification are shared.
+    #[cfg(feature = "operation-tasks")]
+    pub(crate) fn parse_schema_for_task(&self) -> DeltaResult<StructType> {
+        self.parse_schema_impl(false)
+    }
+
+    fn parse_schema_impl(&self, capture_backtrace: bool) -> DeltaResult<StructType> {
         // TODO(#1896): Increase the supported nesting depth or use non-recursive schema decoding.
         serde_json::from_str(&self.schema_string).map_err(|error| {
             // serde_json keeps ErrorCode::RecursionLimitExceeded private, so we use string
             // matching.
-            if error.is_syntax()
+            let error = if error.is_syntax()
                 && error
                     .to_string()
                     .starts_with(SERDE_JSON_RECURSION_LIMIT_ERROR_PREFIX)
@@ -452,11 +463,15 @@ impl Metadata {
                     "Table schema is too deeply nested: decoding metaData.schemaString exceeded \
                      serde_json's recursion limit: {error}"
                 ))
-                .with_backtrace()
             } else if is_unsupported_delta_type_error(&error) {
-                Error::schema(error.to_string()).with_backtrace()
+                Error::schema(error.to_string())
             } else {
-                error.into()
+                Error::MalformedJson(error)
+            };
+            if capture_backtrace {
+                error.with_backtrace()
+            } else {
+                error
             }
         })
     }

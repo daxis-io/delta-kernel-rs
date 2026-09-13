@@ -13,10 +13,23 @@ use std::sync::Arc;
 use datafusion::execution::context::SessionContext;
 use delta_kernel::StorageHandler;
 
+mod closed_plan_facts;
 mod expression;
+mod json_allocation;
+mod json_arrays;
+mod json_framing;
+mod json_scan;
+#[cfg(test)]
+mod json_task_semantics;
+mod log_input;
+pub mod log_storage;
+mod log_store;
+mod metadata_session;
 mod operator;
 mod plan;
 mod predicate;
+mod result_schema;
+mod row_key_allocation;
 mod scalar;
 mod utils;
 
@@ -51,4 +64,42 @@ impl DataFusionExecutor {
             storage_handler,
         }
     }
+}
+
+mod evaluation_frames;
+
+mod first_value_allocation;
+
+mod schema_conversion_allocation;
+
+mod execution_aux;
+
+mod evaluation_page;
+
+mod case_allocation;
+
+mod planning_allocation;
+
+mod function_allocation;
+
+mod file_pipeline_allocation;
+
+mod evaluation_admission;
+mod evaluation_work;
+mod json_host;
+pub use json_host::{JsonHostAdmissionError, JsonTaskHost};
+
+#[cfg(any(test, feature = "qualification-fixture"))]
+pub mod qualification_fixture;
+
+#[cfg(test)]
+mod json_host_tests;
+
+/// Allocation-free bound for the existing Kernel-to-Arrow schema conversion.
+/// The caller must reserve this complete owner peak before invoking conversion.
+pub fn arrow_schema_owner_bytes(
+    schema: &delta_kernel::schema::StructType,
+    limits: delta_kernel::tasks::TaskLimits,
+) -> Result<usize, delta_kernel::tasks::OperationFailure> {
+    schema_conversion_allocation::peak(schema, limits)
 }

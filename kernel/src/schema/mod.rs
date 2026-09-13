@@ -1985,6 +1985,9 @@ pub enum PrimitiveType {
     Timestamp,
     #[serde(rename = "timestamp_ntz")]
     TimestampNtz,
+    #[cfg(feature = "nanosecond-timestamps")]
+    #[serde(rename = "timestamp_nanos")]
+    TimestampNanos,
     Void,
     /// Year-month interval: a signed count of months (ANSI `INTERVAL YEAR TO MONTH` and its
     /// narrowed `YEAR` / `MONTH` spellings). The serde rename is the `schemaString` type-name
@@ -2180,6 +2183,8 @@ impl<'de> serde::Deserialize<'de> for PrimitiveType {
             "date" => Ok(PrimitiveType::Date),
             "timestamp" => Ok(PrimitiveType::Timestamp),
             "timestamp_ntz" => Ok(PrimitiveType::TimestampNtz),
+            #[cfg(feature = "nanosecond-timestamps")]
+            "timestamp_nanos" => Ok(PrimitiveType::TimestampNanos),
             "void" => Ok(PrimitiveType::Void),
             // Accept canonical and narrowed interval spellings
             s if s.starts_with("interval ") => {
@@ -2262,6 +2267,8 @@ impl Display for PrimitiveType {
             PrimitiveType::Date => write!(f, "date"),
             PrimitiveType::Timestamp => write!(f, "timestamp"),
             PrimitiveType::TimestampNtz => write!(f, "timestamp_ntz"),
+            #[cfg(feature = "nanosecond-timestamps")]
+            PrimitiveType::TimestampNanos => write!(f, "timestamp_nanos"),
             PrimitiveType::IntervalYearMonth => write!(f, "interval year to month"),
             PrimitiveType::IntervalDayTime => write!(f, "interval day to second"),
             PrimitiveType::Decimal(dtype) => {
@@ -2427,6 +2434,8 @@ impl DataType {
     pub const DATE: Self = DataType::Primitive(PrimitiveType::Date);
     pub const TIMESTAMP: Self = DataType::Primitive(PrimitiveType::Timestamp);
     pub const TIMESTAMP_NTZ: Self = DataType::Primitive(PrimitiveType::TimestampNtz);
+    #[cfg(feature = "nanosecond-timestamps")]
+    pub const TIMESTAMP_NANOS: Self = DataType::Primitive(PrimitiveType::TimestampNanos);
     pub const VOID: Self = DataType::Primitive(PrimitiveType::Void);
     pub const INTERVAL_YEAR_MONTH: Self = DataType::Primitive(PrimitiveType::IntervalYearMonth);
     pub const INTERVAL_DAY_TIME: Self = DataType::Primitive(PrimitiveType::IntervalDayTime);

@@ -66,6 +66,18 @@ pub struct AdmittedFooter {
     pub footer: ParquetFooter,
 }
 
+/// Producer-admitted storage result, validated against its outstanding request by the driver.
+pub enum AdmittedIoEffect {
+    /// One bounded discovery page.
+    Listing(AdmittedListingPage),
+    /// An identity-checked exact read.
+    Read(AdmittedRead),
+    /// An observed identity and size.
+    Head(AdmittedHead),
+    /// A bounded footer decode.
+    Footer(AdmittedFooter),
+}
+
 /// Checked cumulative storage-effect measurements retained independently of source ownership.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct IoUsage {
@@ -373,6 +385,7 @@ pub struct OperationDriver<S, C> {
     effect: Option<TaskRequest>,
     response: Option<(RequestKey, Result<TaskResponseV1, OperationFailure>)>,
     active: Option<ActiveEvaluation>,
+    external_active: Option<(EvaluationKey, EvaluationLimits)>,
     source: Option<S>,
     objects: Option<ObjectBindings>,
     listing: Option<ListingBinding>,
@@ -428,6 +441,7 @@ where
                 effect: None,
                 response: None,
                 active: None,
+                external_active: None,
                 source,
                 objects,
                 listing: None,
@@ -528,6 +542,7 @@ where
             source.cancel();
         }
         self.compiler = None;
+        self.external_active = None;
         self.objects = None;
         self.listing = None;
         self.terminal = true;
@@ -545,7 +560,10 @@ where
 
     /// Returns the active evaluation identity while its lazy source is retained.
     pub fn active_evaluation(&self) -> Option<EvaluationKey> {
-        self.active.as_ref().map(|active| active.key)
+        self.active
+            .as_ref()
+            .map(|active| active.key)
+            .or_else(|| self.external_active.map(|active| active.0))
     }
 
     /// Returns cumulative evaluation work separately from live source ownership.
@@ -636,17 +654,25 @@ where
                 if evaluation.task_id() != self.task_id {
                     return Err(TaskProtocolError::WrongKey);
                 }
-                if self.started || self.active.is_some() {
+                if self.started || self.active.is_some() || self.external_active.is_some() {
                     return Err(TaskProtocolError::WrongKind);
                 }
                 Ok(())
             }
             TaskRequestV1::Evaluation { evaluation, limits } => {
-                let active = self.active.as_ref().ok_or(TaskProtocolError::WrongKind)?;
-                if *evaluation != active.key {
+                let (active_key, page_limits) = self
+                    .active
+                    .as_ref()
+                    .map(|active| (active.key, active.page_limits))
+                    .or_else(|| {
+                        self.external_active
+                            .map(|(key, limits)| (key, limits.page()))
+                    })
+                    .ok_or(TaskProtocolError::WrongKind)?;
+                if *evaluation != active_key {
                     return Err(TaskProtocolError::WrongKey);
                 }
-                if *limits != active.page_limits {
+                if *limits != page_limits {
                     return Err(TaskProtocolError::WrongKind);
                 }
                 Ok(())
@@ -656,6 +682,108 @@ where
 
     fn execute(&mut self, operation: TaskRequestV1) -> Result<TaskResponseV1, OperationFailure> {
         match operation {
+            operation @ (TaskRequestV1::List { .. }
+            | TaskRequestV1::Read { .. }
+            | TaskRequestV1::Head { .. }
+            | TaskRequestV1::Footer { .. }) => self.execute_io(operation),
+            TaskRequestV1::EvaluationStart {
+                evaluation,
+                plan,
+                limits,
+            } => {
+                let compiler = self
+                    .compiler
+                    .as_mut()
+                    .ok_or_else(OperationFailure::malformed_response)?;
+                let source = compiler(plan, limits);
+                self.compiler = None;
+                self.read_page(
+                    evaluation,
+                    limits.page(),
+                    EvaluationReader::new(source?, limits),
+                )
+            }
+            TaskRequestV1::Evaluation { evaluation, .. } => {
+                let active = self
+                    .active
+                    .take()
+                    .ok_or_else(OperationFailure::malformed_response)?;
+                self.read_page(evaluation, active.page_limits, active.reader)
+            }
+        }
+    }
+
+    fn execute_io(&mut self, operation: TaskRequestV1) -> Result<TaskResponseV1, OperationFailure> {
+        let expected = self.prepare_io(&operation)?;
+        let source = self
+            .source
+            .as_mut()
+            .ok_or_else(OperationFailure::malformed_response)?;
+        let effect = match &operation {
+            TaskRequestV1::List {
+                root,
+                continuation,
+                entries,
+                descriptor_bytes,
+                continuation_bytes,
+            } => AdmittedIoEffect::Listing(source.list(
+                root,
+                continuation.as_deref(),
+                *entries,
+                *descriptor_bytes,
+                *continuation_bytes,
+            )?),
+            TaskRequestV1::Read {
+                path,
+                offset,
+                length,
+            } => AdmittedIoEffect::Read(source.read_exact(path, expected, *offset, *length)?),
+            TaskRequestV1::Head { path } => AdmittedIoEffect::Head(source.head(path)?),
+            TaskRequestV1::Footer { path, size, limits } => {
+                AdmittedIoEffect::Footer(source.footer(
+                    path,
+                    expected.ok_or_else(OperationFailure::malformed_response)?,
+                    *size,
+                    *limits,
+                )?)
+            }
+            _ => return Err(OperationFailure::malformed_response()),
+        };
+        self.finish_io(operation, effect)
+    }
+
+    // Runs before either synchronous I/O or an asynchronous host effect. No allocations.
+    fn prepare_io(
+        &self,
+        operation: &TaskRequestV1,
+    ) -> Result<Option<ObjectIdentity>, OperationFailure> {
+        match operation {
+            TaskRequestV1::Read { path, .. } | TaskRequestV1::Head { path } => {
+                let objects = self
+                    .objects
+                    .as_ref()
+                    .ok_or_else(OperationFailure::malformed_response)?;
+                objects.admit_new(path)?;
+                Ok(objects.get(path).map(|binding| binding.identity))
+            }
+            TaskRequestV1::Footer { path, size, .. } => self
+                .objects
+                .as_ref()
+                .and_then(|objects| objects.get(path))
+                .filter(|binding| binding.head_observed && binding.size == Some(*size))
+                .map(|binding| Some(binding.identity))
+                .ok_or_else(OperationFailure::malformed_response),
+            _ => Ok(None),
+        }
+    }
+
+    // Both completion paths enter the same identity, ordering, capacity and usage validation.
+    fn finish_io(
+        &mut self,
+        operation: TaskRequestV1,
+        effect: AdmittedIoEffect,
+    ) -> Result<TaskResponseV1, OperationFailure> {
+        match operation {
             TaskRequestV1::List {
                 root,
                 continuation,
@@ -663,17 +791,9 @@ where
                 descriptor_bytes,
                 continuation_bytes,
             } => {
-                let page = self
-                    .source
-                    .as_mut()
-                    .ok_or_else(OperationFailure::malformed_response)?
-                    .list(
-                        &root,
-                        continuation.as_deref(),
-                        entries,
-                        descriptor_bytes,
-                        continuation_bytes,
-                    )?;
+                let AdmittedIoEffect::Listing(page) = effect else {
+                    return Err(OperationFailure::malformed_response());
+                };
                 validate_listing(
                     &root,
                     continuation.as_deref(),
@@ -705,11 +825,9 @@ where
                 let expected_identity = binding.map(|binding| binding.identity);
                 let known_size = binding.and_then(|binding| binding.size);
                 let head_observed = binding.is_some_and(|binding| binding.head_observed);
-                let read = self
-                    .source
-                    .as_mut()
-                    .ok_or_else(OperationFailure::malformed_response)?
-                    .read_exact(&path, expected_identity, offset, length)?;
+                let AdmittedIoEffect::Read(read) = effect else {
+                    return Err(OperationFailure::malformed_response());
+                };
                 let length_u64 =
                     u64::try_from(length).map_err(|_| OperationFailure::malformed_response())?;
                 let end = offset
@@ -746,11 +864,9 @@ where
                 let previous = objects
                     .get(&path)
                     .map(|binding| (binding.identity, binding.size));
-                let head = self
-                    .source
-                    .as_mut()
-                    .ok_or_else(OperationFailure::malformed_response)?
-                    .head(&path)?;
+                let AdmittedIoEffect::Head(head) = effect else {
+                    return Err(OperationFailure::malformed_response());
+                };
                 if previous.is_some_and(|(identity, size)| {
                     identity != head.identity || size.is_some_and(|size| size != head.size)
                 }) {
@@ -761,7 +877,11 @@ where
                 self.io_usage = self.io_usage.with_head()?;
                 Ok(TaskResponseV1::Head { size })
             }
-            TaskRequestV1::Footer { path, size, limits } => {
+            TaskRequestV1::Footer {
+                path,
+                size,
+                limits: _,
+            } => {
                 let identity = self
                     .objects
                     .as_ref()
@@ -769,11 +889,9 @@ where
                     .filter(|binding| binding.head_observed && binding.size == Some(size))
                     .map(|binding| binding.identity)
                     .ok_or_else(OperationFailure::malformed_response)?;
-                let footer = self
-                    .source
-                    .as_mut()
-                    .ok_or_else(OperationFailure::malformed_response)?
-                    .footer(&path, identity, size, limits)?;
+                let AdmittedIoEffect::Footer(footer) = effect else {
+                    return Err(OperationFailure::malformed_response());
+                };
                 if footer.identity != identity || footer.size != size {
                     return Err(OperationFailure::malformed_response());
                 }
@@ -782,30 +900,7 @@ where
                     footer: footer.footer,
                 })
             }
-            TaskRequestV1::EvaluationStart {
-                evaluation,
-                plan,
-                limits,
-            } => {
-                let compiler = self
-                    .compiler
-                    .as_mut()
-                    .ok_or_else(OperationFailure::malformed_response)?;
-                let source = compiler(plan, limits);
-                self.compiler = None;
-                self.read_page(
-                    evaluation,
-                    limits.page(),
-                    EvaluationReader::new(source?, limits),
-                )
-            }
-            TaskRequestV1::Evaluation { evaluation, .. } => {
-                let active = self
-                    .active
-                    .take()
-                    .ok_or_else(OperationFailure::malformed_response)?;
-                self.read_page(evaluation, active.page_limits, active.reader)
-            }
+            _ => Err(OperationFailure::malformed_response()),
         }
     }
 
@@ -844,8 +939,10 @@ where
 
     fn release_terminal_state(&mut self) {
         self.active = None;
+        self.external_active = None;
         self.source = None;
         self.compiler = None;
+        self.external_active = None;
         self.objects = None;
         self.listing = None;
         self.terminal = true;
@@ -909,6 +1006,250 @@ fn validate_listing(
         return Err(OperationFailure::malformed_response());
     }
     Ok(())
+}
+
+/// Producer-admitted result of an asynchronous external effect.
+pub enum AdmittedAsyncEffect {
+    /// Storage metadata or bytes, checked by the same validator as synchronous I/O.
+    Io(AdmittedIoEffect),
+    /// One page from the single evaluation owned by this task's host.
+    Evaluation {
+        /// Identity bound to the host's execution stream.
+        evaluation: EvaluationKey,
+        /// An admitted page, or definitive end of the stream.
+        page: Option<super::EvaluationPage>,
+    },
+}
+
+/// Host-owned asynchronous effects. Implementations retain their own futures and execution
+/// streams, and admit allocations before creating returned values. They must respect both the
+/// request's page limits and the remaining cumulative evaluation allowances described by `usage`.
+/// A returned page is validated again by the driver; that validation is not allocation admission.
+pub trait AdmittedAsyncHost {
+    /// Performs one already dispatched effect. The request remains owned by the driver until
+    /// completion, including the admitted plan on the single evaluation start.
+    fn complete<'a>(
+        &'a mut self,
+        request: &'a TaskRequestV1,
+        expected_identity: Option<ObjectIdentity>,
+        usage: EvaluationUsage,
+        work: super::PendingWork<'a>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<AdmittedAsyncEffect, OperationFailure>> + 'a>,
+    >;
+
+    /// Releases execution streams, provider state and outstanding host resources without pulls.
+    fn cancel(&mut self);
+}
+
+type NoCompiler =
+    fn(AdmittedPlan, EvaluationLimits) -> Result<AdmittedEvaluationSource, OperationFailure>;
+
+fn no_sync_compiler(
+    _: AdmittedPlan,
+    _: EvaluationLimits,
+) -> Result<AdmittedEvaluationSource, OperationFailure> {
+    Err(OperationFailure::malformed_response())
+}
+
+/// Asynchronous completion over the existing request/response driver. Futures and streams belong
+/// to `host`; Kernel task state contains only admitted data and identities. Dropping this driver
+/// cancels the host. Dropping an in-flight completion future leaves its request pending and
+/// requires cancellation, preventing a second evaluation start or duplicate external side effect.
+pub struct AsyncOperationDriver<H: AdmittedAsyncHost> {
+    driver: OperationDriver<(), NoCompiler>,
+    host: H,
+    in_flight: bool,
+}
+
+impl<H: AdmittedAsyncHost> AsyncOperationDriver<H> {
+    /// Allocates an independent task identity and a bounded shared I/O validation ledger.
+    pub fn allocate(host: H, limits: TaskLimits) -> Result<(TaskId, Self), TaskProtocolError> {
+        let (id, driver) =
+            OperationDriver::allocate_with_io((), no_sync_compiler as NoCompiler, limits)?;
+        Ok((
+            id,
+            Self {
+                driver,
+                host,
+                in_flight: false,
+            },
+        ))
+    }
+
+    /// Allocates the one evaluation identity before dispatch starts.
+    pub fn allocate_evaluation(&self) -> Result<EvaluationKey, TaskProtocolError> {
+        self.driver.allocate_evaluation()
+    }
+
+    /// Uses the existing request-key, ordering, kind and one-start validation.
+    pub fn dispatch(&mut self, request: TaskRequest) -> Result<RequestKey, TaskProtocolError> {
+        if self.in_flight {
+            return Err(TaskProtocolError::PendingRequest);
+        }
+        self.driver.dispatch(request)
+    }
+
+    /// Awaits exactly one host effect and validates its admitted result before retaining it.
+    pub async fn complete_effect(
+        &mut self,
+        work: super::PendingWork<'_>,
+    ) -> Result<RequestKey, TaskProtocolError> {
+        if self.in_flight || self.driver.response.is_some() {
+            return Err(TaskProtocolError::PendingRequest);
+        }
+        if self.driver.terminal {
+            return Err(TaskProtocolError::Terminal);
+        }
+        let request = self
+            .driver
+            .effect
+            .as_ref()
+            .ok_or(TaskProtocolError::NotStarted)?;
+        let key = request.key;
+        if work.key() != key {
+            return Err(TaskProtocolError::WrongKey);
+        }
+        let prepared = self
+            .driver
+            .prepare_io(&request.operation)
+            .and_then(|identity| {
+                let limits = match &request.operation {
+                    TaskRequestV1::EvaluationStart { limits, .. } => Some(*limits),
+                    TaskRequestV1::Evaluation { .. } => {
+                        self.driver.external_active.map(|active| active.1)
+                    }
+                    _ => None,
+                };
+                if let Some(limits) = limits {
+                    self.driver.usage.begin_page(limits)?;
+                }
+                Ok(identity)
+            });
+        let result = match prepared {
+            Ok(expected_identity) => {
+                self.in_flight = true;
+                let result = self
+                    .host
+                    .complete(
+                        &request.operation,
+                        expected_identity,
+                        self.driver.usage,
+                        work,
+                    )
+                    .await;
+                self.in_flight = false;
+                result
+            }
+            Err(error) => Err(error),
+        };
+        let request = self
+            .driver
+            .effect
+            .take()
+            .ok_or(TaskProtocolError::NotStarted)?;
+        let response = result.and_then(|effect| self.finish(request.operation, effect));
+        if response.is_err() {
+            self.host.cancel();
+            self.driver.release_terminal_state();
+        }
+        self.driver.response = Some((key, response));
+        Ok(key)
+    }
+
+    fn finish(
+        &mut self,
+        request: TaskRequestV1,
+        effect: AdmittedAsyncEffect,
+    ) -> Result<TaskResponseV1, OperationFailure> {
+        match (request, effect) {
+            (
+                request @ (TaskRequestV1::List { .. }
+                | TaskRequestV1::Read { .. }
+                | TaskRequestV1::Head { .. }
+                | TaskRequestV1::Footer { .. }),
+                AdmittedAsyncEffect::Io(effect),
+            ) => self.driver.finish_io(request, effect),
+            (
+                TaskRequestV1::EvaluationStart {
+                    evaluation, limits, ..
+                },
+                AdmittedAsyncEffect::Evaluation {
+                    evaluation: actual,
+                    page,
+                },
+            ) => {
+                self.driver.compiler = None;
+                self.finish_page(evaluation, actual, limits, page)
+            }
+            (
+                TaskRequestV1::Evaluation { evaluation, .. },
+                AdmittedAsyncEffect::Evaluation {
+                    evaluation: actual,
+                    page,
+                },
+            ) => {
+                let limits = self
+                    .driver
+                    .external_active
+                    .ok_or_else(OperationFailure::malformed_response)?
+                    .1;
+                self.finish_page(evaluation, actual, limits, page)
+            }
+            _ => Err(OperationFailure::malformed_response()),
+        }
+    }
+
+    fn finish_page(
+        &mut self,
+        expected: EvaluationKey,
+        actual: EvaluationKey,
+        limits: EvaluationLimits,
+        page: Option<super::EvaluationPage>,
+    ) -> Result<TaskResponseV1, OperationFailure> {
+        if expected != actual {
+            return Err(OperationFailure::malformed_response());
+        }
+        self.driver.usage.record_page(limits, page.as_ref())?;
+        self.driver.external_active = page.as_ref().map(|_| (expected, limits));
+        Ok(TaskResponseV1::Evaluation {
+            evaluation: expected,
+            page,
+        })
+    }
+
+    /// Transfers the response only for the exact outstanding key.
+    pub fn take_response(
+        &mut self,
+        key: RequestKey,
+    ) -> Result<Result<TaskResponseV1, OperationFailure>, TaskProtocolError> {
+        self.driver.take_response(key)
+    }
+
+    /// Cancels pending work and drops host execution resources without polling.
+    pub fn cancel(&mut self, key: Option<RequestKey>) -> Result<(), TaskProtocolError> {
+        self.driver.cancel(key)?;
+        self.host.cancel();
+        self.in_flight = false;
+        Ok(())
+    }
+
+    /// Returns cumulative validated evaluation usage after completion or cancellation.
+    pub fn evaluation_usage(&self) -> EvaluationUsage {
+        self.driver.evaluation_usage()
+    }
+
+    /// Returns cumulative validated storage usage after completion or cancellation.
+    pub fn io_usage(&self) -> IoUsage {
+        self.driver.io_usage()
+    }
+}
+
+impl<H: AdmittedAsyncHost> Drop for AsyncOperationDriver<H> {
+    fn drop(&mut self) {
+        self.host.cancel();
+        let _ = self.driver.cancel(self.driver.outstanding_key());
+    }
 }
 
 #[cfg(test)]

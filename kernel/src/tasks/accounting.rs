@@ -313,3 +313,36 @@ impl TaskAccounting {
         counter.set(usage);
     }
 }
+
+/// Work-only loan of one task's ledger while its exact request is pending.
+///
+/// The task constructs this view; callers cannot forge its key or replace its
+/// accounting authority. Holding the borrow prevents resuming/cancelling the
+/// task. Hosts prepay semantic work before executing it; successful charges
+/// remain consumed if a completion future is abandoned or fails.
+pub struct PendingWork<'a> {
+    pub(super) key: super::RequestKey,
+    pub(super) accounting: &'a TaskAccounting,
+}
+impl PendingWork<'_> {
+    /// The only request for which this loan authorizes host work.
+    pub fn key(&self) -> super::RequestKey {
+        self.key
+    }
+    /// Kernel task owners that remain live while the host completes this request.
+    /// This read-only observation excludes the transferred request. Hosts must
+    /// compose it with their request and execution owners before allocation.
+    pub fn retained_task_bytes(&self) -> usize {
+        self.accounting.usage(Resource::TaskStateBytes).live()
+    }
+    /// Remaining cumulative work, including all prior Kernel and host charges.
+    pub fn remaining(&self) -> usize {
+        self.accounting
+            .limit(Resource::WorkUnits)
+            .saturating_sub(self.accounting.usage(Resource::WorkUnits).consumed())
+    }
+    /// Admits and permanently charges work before the corresponding stage.
+    pub fn charge(&self, units: usize) -> Result<(), ResourceExhausted> {
+        self.accounting.charge(Resource::WorkUnits, units)
+    }
+}

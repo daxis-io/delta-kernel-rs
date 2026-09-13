@@ -62,7 +62,8 @@ z85 = "3.0.6"
 # `reqwest` is only needed for the gated `Error::Reqwest` variant; the actual HTTP client
 # lives in the `delta_kernel_default_engine` crate now.
 reqwest = { version = "0.13", default-features = false, optional = true }
-# Native Parquet support uses the compatibility object_store version.
+# Native Parquet support selects its matching object_store version.
+object_store_14 = { package = "object_store", version = "0.14.1", optional = true, features = ["aws", "azure", "gcp", "http"] }
 object_store_13 = { package = "object_store", version = "0.13.2", optional = true, features = ["aws", "azure", "gcp", "http"] }
 
 # arrow 58
@@ -101,6 +102,7 @@ uuid = { version = "1.18.0", features = ["v4", "js"] }
 getrandom = { version = "0.3.4", features = ["wasm_js"] }
 
 [features]
+nanosecond-timestamps = []
 # no default features
 default = []
 # internal-api will make everything marked #[internal_api] public.
@@ -118,7 +120,7 @@ need-arrow = [] # need-arrow is a marker that the feature needs arrow dep
 
 arrow-only = ["dep:arrow_59"]
 arrow-58 = ["dep:arrow_58", "dep:parquet_58", "dep:object_store_13"]
-arrow-59 = ["arrow-only", "dep:parquet_59", "dep:object_store_13"]
+arrow-59 = ["arrow-only", "dep:parquet_59", "dep:object_store_14"]
 arrow-conversion = ["need-arrow"]
 arrow-engine-data = ["arrow-conversion"]
 arrow-expression = ["arrow-engine-data"]

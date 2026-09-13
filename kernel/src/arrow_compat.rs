@@ -11,7 +11,44 @@ pub use parquet_59 as parquet;
 
 #[cfg(any(feature = "arrow-58", feature = "arrow-59"))]
 pub mod object_store {
+    #[cfg(not(feature = "arrow-59"))]
     pub use object_store_13::*;
+    #[cfg(feature = "arrow-59")]
+    pub use object_store_14::*;
+
+    /// Constructs a GET response using the selected object-store version.
+    ///
+    /// The payload, metadata, range, and attributes are transferred unchanged. Runtime
+    /// extensions, where supported, start empty. This function does not perform I/O.
+    #[doc(hidden)]
+    pub fn new_get_result(
+        payload: GetResultPayload,
+        meta: ObjectMeta,
+        range: std::ops::Range<u64>,
+        attributes: Attributes,
+    ) -> GetResult {
+        GetResult {
+            payload,
+            meta,
+            range,
+            attributes,
+            #[cfg(feature = "arrow-59")]
+            extensions: Default::default(),
+        }
+    }
+
+    /// Constructs a PUT response with the supplied etag and version.
+    ///
+    /// Runtime extensions, where supported, start empty. This function does not perform I/O.
+    #[doc(hidden)]
+    pub fn new_put_result(e_tag: Option<String>, version: Option<String>) -> PutResult {
+        PutResult {
+            e_tag,
+            version,
+            #[cfg(feature = "arrow-59")]
+            extensions: Default::default(),
+        }
+    }
 }
 
 #[cfg(all(

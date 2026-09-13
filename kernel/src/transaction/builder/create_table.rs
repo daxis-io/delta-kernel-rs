@@ -24,6 +24,8 @@ use crate::schema::{
     StructType,
 };
 use crate::table_configuration::TableConfiguration;
+#[cfg(feature = "nanosecond-timestamps")]
+use crate::table_features::schema_contains_timestamp_nanos;
 use crate::table_features::{
     add_feature_to_lists, assign_column_mapping_metadata, auto_enable_property_driven_features,
     find_max_column_id_in_schema, get_any_level_column_physical_name,
@@ -378,6 +380,17 @@ fn maybe_enable_variant_type(schema: &SchemaRef, validated: &mut ValidatedTableP
 
 /// Conditionally adds the `timestampNtz` feature to the protocol when the schema contains
 /// TimestampNTZ columns anywhere in the schema tree (top-level, nested structs, arrays, maps).
+#[cfg(feature = "nanosecond-timestamps")]
+fn maybe_enable_timestamp_nanos(schema: &SchemaRef, validated: &mut ValidatedTableProperties) {
+    if schema_contains_timestamp_nanos(schema) {
+        add_feature_to_lists(
+            TableFeature::TimestampNanos,
+            &mut validated.reader_features,
+            &mut validated.writer_features,
+        );
+    }
+}
+
 fn maybe_enable_timestamp_ntz(schema: &SchemaRef, validated: &mut ValidatedTableProperties) {
     if schema_contains_timestamp_ntz(schema) {
         add_feature_to_lists(
@@ -940,6 +953,8 @@ impl CreateTableTransactionBuilder {
         // Schema-driven auto-enablement: detect types or annotations that require a feature
         maybe_enable_variant_type(&effective_schema, &mut validated);
         maybe_enable_timestamp_ntz(&effective_schema, &mut validated);
+        #[cfg(feature = "nanosecond-timestamps")]
+        maybe_enable_timestamp_nanos(&effective_schema, &mut validated);
         maybe_enable_invariants(&effective_schema, &mut validated);
 
         // Property-driven auto-enablement: check enablement properties

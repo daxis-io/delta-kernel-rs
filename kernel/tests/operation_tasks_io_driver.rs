@@ -891,6 +891,7 @@ fn descriptor(path: &str) -> FileDescriptor {
         path: path.into(),
         size: 4,
         modification_time: 0,
+        identity: ObjectIdentity::new([7; 32]),
     }
 }
 

@@ -112,6 +112,7 @@ message Scalar {
     MapData map = 17;
     int32 interval_year_month = 18; // year-month interval: signed month count
     int64 interval_day_time = 19;   // day-time interval: signed microsecond count
+    int64 timestamp_nanos = 20;     // nanoseconds since epoch, UTC
   }
 }
 

@@ -22,10 +22,13 @@ use delta_kernel::parquet::arrow::arrow_reader::{
     ArrowReaderMetadata, ParquetRecordBatchReaderBuilder,
 };
 use delta_kernel::parquet::arrow::arrow_writer::ArrowWriter;
-use delta_kernel::parquet::arrow::async_reader::{
-    ParquetObjectReader, ParquetRecordBatchStreamBuilder,
-};
-use delta_kernel::parquet::arrow::async_writer::{AsyncArrowWriter, ParquetObjectWriter};
+#[allow(
+    deprecated,
+    reason = "preserve exact range and batched reads on the pinned native reader"
+)]
+use delta_kernel::parquet::arrow::async_reader::ParquetObjectReader;
+use delta_kernel::parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder;
+use delta_kernel::parquet::arrow::async_writer::AsyncArrowWriter;
 use delta_kernel::schema::{SchemaRef, StructType};
 use delta_kernel::transaction::BoundWriteContext;
 use delta_kernel::{
@@ -383,7 +386,7 @@ impl<E: TaskExecutor> ParquetHandler for DefaultParquetHandler<E> {
             let first_arrow = ArrowEngineData::try_from_engine_data(first_batch)?;
             let first_record_batch: RecordBatch = (*first_arrow).into();
 
-            let object_writer = ParquetObjectWriter::new(store, path);
+            let object_writer = delta_kernel::object_store::buffered::BufWriter::new(store, path);
             let schema = first_record_batch.schema();
             let mut writer =
                 AsyncArrowWriter::try_new_with_options(object_writer, schema, writer_options())?;
@@ -432,6 +435,10 @@ impl<E: TaskExecutor> ParquetHandler for DefaultParquetHandler<E> {
                 ArrowReaderMetadata::load(&bytes, reader_options())?
             } else {
                 let path = Path::from_url_path(location.path())?;
+                #[allow(
+                    deprecated,
+                    reason = "preserve known-size exact native footer range reads"
+                )]
                 let mut reader = ParquetObjectReader::new(store, path).with_file_size(file_size);
                 ArrowReaderMetadata::load_async(&mut reader, reader_options()).await?
             };
@@ -461,6 +468,10 @@ async fn open_parquet_file(
     let file_location = file_meta.location.to_string();
     let path = Path::from_url_path(file_meta.location.path())?;
 
+    #[allow(
+        deprecated,
+        reason = "preserve suffix/exact range and batched native reads without read-ahead"
+    )]
     let mut reader = {
         use delta_kernel::object_store::ObjectStoreScheme;
         // HACK: unfortunately, `ParquetObjectReader` under the hood does a suffix range

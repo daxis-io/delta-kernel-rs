@@ -6,25 +6,40 @@ homepage = "https://delta.io"
 license = "Apache-2.0"
 repository = "https://github.com/delta-io/delta-kernel-rs"
 version = "0.26.0"
-rust-version = "1.88"
+rust-version = "1.94.0"
 
 [workspace]
+
+[features]
+# Shared deterministic source for native/browser qualification only.
+qualification-fixture = []
 
 [dependencies]
 delta_kernel = { path = "../kernel", default-features = false, features = [
   "declarative-plans",
+  "operation-tasks",
   "vendored-protoc",
   "arrow-only",
   "arrow-expression",
 ] }
 datafusion = { version = "55", default-features = false, features = ["nested_expressions"] }
 itertools = "0.14"
+async-trait = "0.1"
+dashmap = { version = "6.2.1", default-features = false }
+futures = "0.3"
+bytes = "1"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+url = "2"
+object_store = { version = "0.14.1", default-features = false }
+datafusion-datasource = { version = "55", default-features = false }
+datafusion-datasource-json = { version = "55", default-features = false }
 
 [target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
-datafusion = { version = "55", default-features = false, features = ["runtime-tokio"] }
+datafusion = { version = "55", default-features = false, features = ["runtime-tokio", "json"] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 datafusion = { version = "55", default-features = false, features = ["browser"] }
+datafusion-datasource-json = { version = "55", default-features = false, features = ["runtime-browser"] }
 
 [dev-dependencies]
 rstest = "0.23"
@@ -32,66 +47,5 @@ rstest = "0.23"
 [target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
-# Narrow Phase C qualification-only local dependency overlay.
+# Narrow Phase D qualification-only local dependency overlay.
 [patch.crates-io]
-arrow = { path = "/Users/ethanurbanski/axon/.worktrees/canonical-native-wasm-arrow-rs-59.3.0-metadata-limits/arrow" }
-arrow-arith = { path = "/Users/ethanurbanski/axon/.worktrees/canonical-native-wasm-arrow-rs-59.3.0-metadata-limits/arrow-arith" }
-arrow-array = { path = "/Users/ethanurbanski/axon/.worktrees/canonical-native-wasm-arrow-rs-59.3.0-metadata-limits/arrow-array" }
-arrow-avro = { path = "/Users/ethanurbanski/axon/.worktrees/canonical-native-wasm-arrow-rs-59.3.0-metadata-limits/arrow-avro" }
-arrow-buffer = { path = "/Users/ethanurbanski/axon/.worktrees/canonical-native-wasm-arrow-rs-59.3.0-metadata-limits/arrow-buffer" }
-arrow-cast = { path = "/Users/ethanurbanski/axon/.worktrees/canonical-native-wasm-arrow-rs-59.3.0-metadata-limits/arrow-cast" }
-arrow-csv = { path = "/Users/ethanurbanski/axon/.worktrees/canonical-native-wasm-arrow-rs-59.3.0-metadata-limits/arrow-csv" }
-arrow-data = { path = "/Users/ethanurbanski/axon/.worktrees/canonical-native-wasm-arrow-rs-59.3.0-metadata-limits/arrow-data" }
-arrow-flight = { path = "/Users/ethanurbanski/axon/.worktrees/canonical-native-wasm-arrow-rs-59.3.0-metadata-limits/arrow-flight" }
-arrow-ipc = { path = "/Users/ethanurbanski/axon/.worktrees/canonical-native-wasm-arrow-rs-59.3.0-metadata-limits/arrow-ipc" }
-arrow-json = { path = "/Users/ethanurbanski/axon/.worktrees/canonical-native-wasm-arrow-rs-59.3.0-metadata-limits/arrow-json" }
-arrow-ord = { path = "/Users/ethanurbanski/axon/.worktrees/canonical-native-wasm-arrow-rs-59.3.0-metadata-limits/arrow-ord" }
-arrow-row = { path = "/Users/ethanurbanski/axon/.worktrees/canonical-native-wasm-arrow-rs-59.3.0-metadata-limits/arrow-row" }
-arrow-schema = { path = "/Users/ethanurbanski/axon/.worktrees/canonical-native-wasm-arrow-rs-59.3.0-metadata-limits/arrow-schema" }
-arrow-select = { path = "/Users/ethanurbanski/axon/.worktrees/canonical-native-wasm-arrow-rs-59.3.0-metadata-limits/arrow-select" }
-arrow-string = { path = "/Users/ethanurbanski/axon/.worktrees/canonical-native-wasm-arrow-rs-59.3.0-metadata-limits/arrow-string" }
-datafusion = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/core" }
-datafusion-catalog = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/catalog" }
-datafusion-catalog-listing = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/catalog-listing" }
-datafusion-common = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/common" }
-datafusion-common-runtime = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/common-runtime" }
-datafusion-datasource = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/datasource" }
-datafusion-datasource-arrow = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/datasource-arrow" }
-datafusion-datasource-avro = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/datasource-avro" }
-datafusion-datasource-csv = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/datasource-csv" }
-datafusion-datasource-json = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/datasource-json" }
-datafusion-datasource-parquet = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/datasource-parquet" }
-datafusion-doc = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/doc" }
-datafusion-execution = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/execution" }
-datafusion-expr = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/expr" }
-datafusion-expr-common = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/expr-common" }
-datafusion-ffi = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/ffi" }
-datafusion-functions = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/functions" }
-datafusion-functions-aggregate = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/functions-aggregate" }
-datafusion-functions-aggregate-common = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/functions-aggregate-common" }
-datafusion-functions-nested = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/functions-nested" }
-datafusion-functions-table = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/functions-table" }
-datafusion-functions-window = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/functions-window" }
-datafusion-functions-window-common = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/functions-window-common" }
-datafusion-macros = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/macros" }
-datafusion-optimizer = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/optimizer" }
-datafusion-physical-expr = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/physical-expr" }
-datafusion-physical-expr-adapter = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/physical-expr-adapter" }
-datafusion-physical-expr-common = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/physical-expr-common" }
-datafusion-physical-optimizer = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/physical-optimizer" }
-datafusion-physical-plan = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/physical-plan" }
-datafusion-proto = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/proto" }
-datafusion-proto-common = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/proto-common" }
-datafusion-proto-models = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/proto-models" }
-datafusion-pruning = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/pruning" }
-datafusion-session = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/session" }
-datafusion-spark = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/spark" }
-datafusion-sql = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/sql" }
-datafusion-substrait = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-datafusion-20260911/datafusion/substrait" }
-datafusion_executor = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-kernel-20260911/datafusion-executor" }
-delta_kernel = { path = "/Users/ethanurbanski/axon/.worktrees/narrow-phase-c-kernel-20260911/kernel" }
-object_store = { path = "/Users/ethanurbanski/axon/.worktrees/canonical-native-wasm-object-store-0.14.1" }
-parquet = { path = "/Users/ethanurbanski/axon/.worktrees/canonical-native-wasm-arrow-rs-59.3.0-metadata-limits/parquet" }
-parquet-variant = { path = "/Users/ethanurbanski/axon/.worktrees/canonical-native-wasm-arrow-rs-59.3.0-metadata-limits/parquet-variant" }
-parquet-variant-compute = { path = "/Users/ethanurbanski/axon/.worktrees/canonical-native-wasm-arrow-rs-59.3.0-metadata-limits/parquet-variant-compute" }
-parquet-variant-json = { path = "/Users/ethanurbanski/axon/.worktrees/canonical-native-wasm-arrow-rs-59.3.0-metadata-limits/parquet-variant-json" }
