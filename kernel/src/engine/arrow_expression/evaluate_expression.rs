@@ -485,9 +485,9 @@ fn evaluate_array_expression(
     let mut mutable = MutableArrayData::new(array_data.iter().collect(), false, total_len);
     for row in 0..num_rows {
         for col in 0..n {
-            #[cfg(feature = "arrow-59")]
+            #[cfg(feature = "arrow-only")]
             mutable.try_extend(col, row, row + 1)?;
-            #[cfg(not(feature = "arrow-59"))]
+            #[cfg(not(feature = "arrow-only"))]
             mutable.extend(col, row, row + 1);
         }
     }
@@ -936,15 +936,15 @@ pub fn coalesce_arrays(
         // Find first non-null value for this row
         match arrays.iter().enumerate().find(|(_, arr)| arr.is_valid(row)) {
             Some((array_idx, _)) => {
-                #[cfg(feature = "arrow-59")]
+                #[cfg(feature = "arrow-only")]
                 mutable.try_extend(array_idx, row, row + 1)?;
-                #[cfg(not(feature = "arrow-59"))]
+                #[cfg(not(feature = "arrow-only"))]
                 mutable.extend(array_idx, row, row + 1);
             }
             None => {
-                #[cfg(feature = "arrow-59")]
+                #[cfg(feature = "arrow-only")]
                 mutable.try_extend_nulls(1)?;
-                #[cfg(not(feature = "arrow-59"))]
+                #[cfg(not(feature = "arrow-only"))]
                 mutable.extend_nulls(1);
             }
         }
