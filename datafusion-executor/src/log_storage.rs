@@ -185,10 +185,11 @@ impl JsonLogStorageRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use datafusion::execution::config::SessionConfig;
     use delta_kernel::tasks::{FailureKind, ObjectIdentity};
     use object_store::memory::InMemory;
+
+    use super::*;
 
     struct NoIo;
     impl AdmittedJsonLogStorage for NoIo {

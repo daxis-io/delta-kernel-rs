@@ -72,8 +72,9 @@ fn grown(initial: usize, maximum: usize, element_size: usize, minimum: usize) ->
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use delta_kernel::tasks::FailureKind;
+
+    use super::*;
 
     #[test]
     fn tape_refuses_exact_peak_minus_one_before_construction() {

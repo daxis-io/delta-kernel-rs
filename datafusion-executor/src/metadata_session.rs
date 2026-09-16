@@ -1,8 +1,11 @@
 //! Fixed planning environment for Kernel's two closed metadata producers.
 //!
-//! This state shares the caller's pool, cache and storage resources through Arc ownership. It never clones the
-//! caller's user registries, invokes custom optimizer/planner callbacks, or alters registrations.
-//! The host must admit this state's construction, lowering and execution before calling `new`.
+//! This state shares the caller's pool, cache and storage resources through Arc ownership. It never
+//! clones the caller's user registries, invokes custom optimizer/planner callbacks, or alters
+//! registrations. The host must admit this state's construction, lowering and execution before
+//! calling `new`.
+
+use std::sync::Arc;
 
 use datafusion::catalog::MemoryCatalogProviderList;
 use datafusion::common::Result;
@@ -11,7 +14,6 @@ use datafusion::execution::context::SessionContext;
 use datafusion::execution::disk_manager::{DiskManagerBuilder, DiskManagerMode};
 use datafusion::execution::session_state::{SessionState, SessionStateBuilder};
 use datafusion::physical_optimizer::sanity_checker::SanityCheckPlan;
-use std::sync::Arc;
 
 /// Construction owners of this module's fixed session (excluding logical/
 /// physical plans, streams and the surrounding host/future). No caller maps,
@@ -19,24 +21,21 @@ use std::sync::Arc;
 pub(crate) fn bootstrap_peak(
     limits: delta_kernel::tasks::TaskLimits,
 ) -> std::result::Result<usize, delta_kernel::tasks::OperationFailure> {
-    use datafusion::common::{
-        alias::AliasGenerator,
-        config::{ConfigOptions, TableOptions},
-        HashMap,
-    };
-    use datafusion::execution::{disk_manager::DiskManager, runtime_env::RuntimeEnv};
+    use std::mem::size_of;
+    use std::sync::atomic::{AtomicU64, AtomicUsize};
+    use std::sync::RwLock;
+
+    use datafusion::common::alias::AliasGenerator;
+    use datafusion::common::config::{ConfigOptions, TableOptions};
+    use datafusion::common::HashMap;
+    use datafusion::execution::disk_manager::DiskManager;
+    use datafusion::execution::runtime_env::RuntimeEnv;
     use datafusion::logical_expr::registry::{
         ExtensionTypeRegistrationRef, MemoryExtensionTypeRegistry,
     };
-    use datafusion::optimizer::analyzer::{
-        resolve_grouping_function::ResolveGroupingFunction, type_coercion::TypeCoercion,
-    };
+    use datafusion::optimizer::analyzer::resolve_grouping_function::ResolveGroupingFunction;
+    use datafusion::optimizer::analyzer::type_coercion::TypeCoercion;
     use delta_kernel::tasks::{Resource, ResourceExhausted};
-    use std::mem::size_of;
-    use std::sync::{
-        atomic::{AtomicU64, AtomicUsize},
-        RwLock,
-    };
     let arc = 2 * size_of::<usize>();
     let overflow = || ResourceExhausted {
         resource: Resource::MetadataAllocatedBytes,
@@ -225,11 +224,9 @@ mod tests {
         use datafusion::arrow::datatypes::{DataType, Field, Schema};
         use datafusion::common::ScalarValue;
         use datafusion::logical_expr::ScalarUDF;
-        use datafusion::physical_expr::{
-            expressions::{Column, Literal},
-            projection::ProjectionMapping,
-            PhysicalExpr, ScalarFunctionExpr,
-        };
+        use datafusion::physical_expr::expressions::{Column, Literal};
+        use datafusion::physical_expr::projection::ProjectionMapping;
+        use datafusion::physical_expr::{PhysicalExpr, ScalarFunctionExpr};
         let state = new(&SessionContext::new()).unwrap();
         let options = state.config().options();
         let schema = Arc::new(Schema::new(vec![Field::new(

@@ -2,9 +2,10 @@
 //! and ArrowEngineData::visit_rows. These resource descriptors are checked against
 //! the authoritative selected action schemas in tests; they do not interpret logs.
 
+use std::mem::size_of;
+
 use super::json_schema_shape::{hash_peak, vector_peak};
 use crate::schema::{ArrayType, ColumnName, DataType, MapType, StructField, StructType};
-use std::mem::size_of;
 
 pub(super) const PM_PATHS: &[&[&str]] = &[
     &["protocol", "minReaderVersion"],

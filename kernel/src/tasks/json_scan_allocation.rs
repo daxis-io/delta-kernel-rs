@@ -2,10 +2,11 @@
 //! no predicate, StatsOptions::none(), no partitions and column mapping None.
 //! The ordinary builder is retained, including its stats-column membership set.
 
+use std::mem::size_of;
+
 use super::json_schema_shape::{hash_peak, vector_peak};
 use crate::schema::{ColumnName, StructField, StructType};
 use crate::table_configuration::TableConfiguration;
-use std::mem::size_of;
 
 pub(super) fn scan_builder_peak(schema: &StructType, config: &TableConfiguration) -> Option<usize> {
     let fields = schema.num_fields();
@@ -91,8 +92,9 @@ pub(super) fn scan_builder_peak(schema: &StructType, config: &TableConfiguration
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::Arc;
+
+    use super::*;
     #[test]
     fn scan_builder_properties_count_duplicate_and_invalid_paths() {
         let schema =

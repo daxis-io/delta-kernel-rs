@@ -99,11 +99,13 @@ pub(crate) fn rebind(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::Arc;
+
     use datafusion::arrow::array::StringArray;
     use datafusion::arrow::buffer::NullBuffer;
     use datafusion::arrow::datatypes::Schema;
-    use std::sync::Arc;
+
+    use super::*;
 
     fn fixture(parent_valid: bool) -> (RecordBatch, SchemaRef) {
         let child = Arc::new(Field::new("required", DataType::Utf8, true));

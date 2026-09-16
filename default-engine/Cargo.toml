@@ -50,4 +50,4 @@ test_utils = { path = "../test-utils", default-features = false }
 tokio = { version = "1.47", features = ["rt-multi-thread", "macros"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt"] }
 wiremock = "0.6"
-hdfs-native-object-store = { version = "0.16.0" }
+hdfs-native-object-store = { version = "0.17.0" }

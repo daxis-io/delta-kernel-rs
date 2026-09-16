@@ -1,23 +1,23 @@
 //! Concrete local async host for Kernel's sealed no-checkpoint JSON tasks.
-use crate::closed_plan_facts::ClosedPlanFacts;
-use crate::evaluation_page::{AdmittedPageData, PageEnvelope};
-use crate::log_storage::{
-    AdmittedJsonLogStorage, JsonLogStorageRegistry, LogStorageAdmissionError,
-};
-use datafusion::arrow::datatypes::SchemaRef;
-use datafusion::execution::{
-    context::SessionContext,
-    memory_pool::{MemoryConsumer, MemoryReservation},
-    object_store::ObjectStoreUrl,
-};
-use datafusion::physical_plan::SendableRecordBatchStream;
-use delta_kernel::tasks::*;
-use futures::StreamExt;
 use std::alloc::Layout;
 use std::future::Future;
 use std::mem::size_of;
 use std::pin::Pin;
 use std::sync::Arc;
+
+use datafusion::arrow::datatypes::SchemaRef;
+use datafusion::execution::context::SessionContext;
+use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
+use datafusion::execution::object_store::ObjectStoreUrl;
+use datafusion::physical_plan::SendableRecordBatchStream;
+use delta_kernel::tasks::*;
+use futures::StreamExt;
+
+use crate::closed_plan_facts::ClosedPlanFacts;
+use crate::evaluation_page::{AdmittedPageData, PageEnvelope};
+use crate::log_storage::{
+    AdmittedJsonLogStorage, JsonLogStorageRegistry, LogStorageAdmissionError,
+};
 
 /// Admission failure before the host performs storage I/O.
 #[derive(Debug)]

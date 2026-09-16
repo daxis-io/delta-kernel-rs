@@ -1,14 +1,13 @@
 #![cfg(feature = "operation-tasks")]
 
-use delta_kernel::tasks::*;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc, Mutex,
-};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::Poll;
+
+use delta_kernel::tasks::*;
 
 struct Host {
     responses: VecDeque<AdmittedAsyncEffect>,

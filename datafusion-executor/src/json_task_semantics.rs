@@ -3,9 +3,9 @@
 //! completed. Physical size diagnostics below validate fixture-page transfer only; they are not
 //! a decoder allocation proof, an AdmittedAsyncHost implementation, or final qualification.
 
-use crate::json_framing::{self, JsonFraming};
-use crate::log_input::LogInput;
-use crate::log_store::AdmittedLogStore;
+use std::mem::size_of;
+use std::sync::Arc;
+
 use datafusion::arrow::array::{RecordBatch, StructArray};
 use datafusion::prelude::SessionContext;
 use delta_kernel::engine::arrow_conversion::TryIntoArrow;
@@ -16,8 +16,10 @@ use delta_kernel::schema::SchemaRef;
 use delta_kernel::tasks::*;
 use delta_kernel::{DeltaResult, EngineData};
 use object_store::ObjectStore;
-use std::mem::size_of;
-use std::sync::Arc;
+
+use crate::json_framing::{self, JsonFraming};
+use crate::log_input::LogInput;
+use crate::log_store::AdmittedLogStore;
 
 const V0: &[u8] = include_bytes!("../tests/data/phase_d/00000000000000000000.json");
 const V1: &[u8] = include_bytes!("../tests/data/phase_d/00000000000000000001.json");

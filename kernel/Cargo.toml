@@ -181,7 +181,7 @@ futures = "0.3"
 tokio = { version = "1.47", features = ["rt-multi-thread", "macros"] }
 criterion = "0.5"
 # Used for testing parse_url_opts extensibility
-hdfs-native-object-store = { version = "0.16.0" }
+hdfs-native-object-store = { version = "0.17.0" }
 hdfs-native = "0.13.4"
 walkdir = { version = "2.5.0" }
 async-trait = "0.1" # only used for our custom SlowGetStore ObjectStore implementation

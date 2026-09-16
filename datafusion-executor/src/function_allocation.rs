@@ -1,11 +1,13 @@
 //! Per-pull owners of the fixed named_struct/get_field/CASE expression trees.
-use crate::closed_plan_facts::ClosedPlanFacts;
-use crate::json_arrays::{output_type_owner_peak, vec_peak};
+use std::mem::size_of;
+
 use datafusion::arrow::array::ArrayRef;
 use datafusion::arrow::datatypes::{DataType, Field, FieldRef};
 use datafusion::logical_expr::ColumnarValue;
 use delta_kernel::tasks::{OperationFailure, Resource, ResourceExhausted, TaskLimits};
-use std::mem::size_of;
+
+use crate::closed_plan_facts::ClosedPlanFacts;
+use crate::json_arrays::{output_type_owner_peak, vec_peak};
 
 pub(crate) fn peak(
     f: &ClosedPlanFacts,

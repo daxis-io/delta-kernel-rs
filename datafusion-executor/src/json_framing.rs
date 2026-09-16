@@ -214,8 +214,9 @@ fn check(resource: Resource, observed: usize, limits: TaskLimits) -> Result<(), 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use delta_kernel::tasks::FailureKind;
+
+    use super::*;
 
     #[test]
     fn unknown_fields_and_multiple_documents_consume_budget() {

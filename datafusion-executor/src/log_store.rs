@@ -392,10 +392,11 @@ pub(crate) mod tests {
         PATH_COMPARISONS.with(|count| count.replace(0))
     }
 
-    use super::*;
-    use crate::json_framing;
     use delta_kernel::tasks::{AdmittedRead, FileDescriptor, ObjectIdentity};
     use object_store::ObjectStoreExt;
+
+    use super::*;
+    use crate::json_framing;
 
     fn input() -> LogInput {
         input_with_time(0)
@@ -606,11 +607,12 @@ pub(crate) mod tests {
 
 #[cfg(test)]
 mod fixture_plan_tests {
-    use super::*;
-    use crate::json_framing::{self, JsonFraming};
     use datafusion::arrow::array::Int64Array;
     use datafusion::prelude::SessionContext;
     use delta_kernel::tasks::{AdmittedRead, FileDescriptor, ObjectIdentity};
+
+    use super::*;
+    use crate::json_framing::{self, JsonFraming};
 
     // This exercises the real closed producer and ordinary DataFusion lowering semantics.
     // It does not stand in for host pre-allocation or the final adapter qualification gates.

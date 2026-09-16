@@ -1,10 +1,12 @@
 //! Initial conversion of borrowed closed Kernel system schemas into Arrow.
 //! All field metadata must be empty, before the converter's serde/format paths.
-use crate::json_arrays::vec_peak;
+use std::mem::size_of;
+
 use datafusion::arrow::datatypes::{Field, FieldRef, Schema};
 use delta_kernel::schema::{DataType, PrimitiveType, StructType};
 use delta_kernel::tasks::{OperationFailure, Resource, ResourceExhausted, TaskLimits};
-use std::mem::size_of;
+
+use crate::json_arrays::vec_peak;
 
 pub(crate) fn peak(schema: &StructType, limits: TaskLimits) -> Result<usize, OperationFailure> {
     let mut bound = Bound {
@@ -105,10 +107,11 @@ impl Bound {
 }
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::json_arrays::tests::observe_allocations;
     use delta_kernel::engine::arrow_conversion::TryIntoArrow;
     use delta_kernel::schema::{ArrayType, MapType, StructField};
+
+    use super::*;
+    use crate::json_arrays::tests::observe_allocations;
     #[test]
     fn system_conversion_is_admitted_before_names_paths_or_field_arcs() {
         let schema = StructType::new_unchecked([StructField::nullable(

@@ -1,25 +1,21 @@
 //! File groups, partition projection and provider owners for one JSON source.
-use crate::{
-    closed_plan_facts::ClosedPlanFacts,
-    json_arrays::{shared_owner_bytes as owner, vec_peak},
-};
-use datafusion::arrow::datatypes::{FieldRef, Schema};
-use datafusion::common::ScalarValue;
-use datafusion::physical_expr::{
-    expressions::{Column, Literal},
-    projection::ProjectionExpr,
-    PhysicalExpr,
-};
-use datafusion_datasource::{
-    file_groups::FileGroup,
-    file_scan_config::FileScanConfig,
-    projection::{ProjectionOpener, SplitProjection},
-    PartitionedFile, TableSchema,
-};
-use datafusion_datasource_json::source::JsonSource;
-use delta_kernel::tasks::{OperationFailure, Resource, ResourceExhausted, TaskLimits};
 use std::mem::size_of;
 use std::sync::Arc;
+
+use datafusion::arrow::datatypes::{FieldRef, Schema};
+use datafusion::common::ScalarValue;
+use datafusion::physical_expr::expressions::{Column, Literal};
+use datafusion::physical_expr::projection::ProjectionExpr;
+use datafusion::physical_expr::PhysicalExpr;
+use datafusion_datasource::file_groups::FileGroup;
+use datafusion_datasource::file_scan_config::FileScanConfig;
+use datafusion_datasource::projection::{ProjectionOpener, SplitProjection};
+use datafusion_datasource::{PartitionedFile, TableSchema};
+use datafusion_datasource_json::source::JsonSource;
+use delta_kernel::tasks::{OperationFailure, Resource, ResourceExhausted, TaskLimits};
+
+use crate::closed_plan_facts::ClosedPlanFacts;
+use crate::json_arrays::{shared_owner_bytes as owner, vec_peak};
 
 pub(crate) fn peak(f: &ClosedPlanFacts, limits: TaskLimits) -> Result<usize, OperationFailure> {
     let overflow = || ResourceExhausted {

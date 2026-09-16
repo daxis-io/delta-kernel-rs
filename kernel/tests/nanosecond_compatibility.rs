@@ -106,9 +106,8 @@ fn nanos_arrow_parquet_roundtrip_keeps_signed_values_and_statistics() {
     use delta_kernel::arrow::datatypes::{DataType as ArrowType, Field, Schema, TimeUnit};
     use delta_kernel::arrow::record_batch::RecordBatch;
     use delta_kernel::engine::arrow_conversion::{TryIntoArrow, TryIntoKernel};
-    use delta_kernel::parquet::arrow::{
-        arrow_reader::ParquetRecordBatchReaderBuilder, ArrowWriter,
-    };
+    use delta_kernel::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use delta_kernel::parquet::arrow::ArrowWriter;
     use delta_kernel::parquet::file::statistics::Statistics;
 
     let arrow_type: ArrowType = (&DataType::TIMESTAMP_NANOS).try_into_arrow().unwrap();
@@ -168,10 +167,8 @@ fn nanos_arrow_parquet_roundtrip_keeps_signed_values_and_statistics() {
 #[cfg(feature = "operation-tasks")]
 #[test]
 fn nanos_plan_shape_accounts_wire_and_rejects_tight_budget() {
-    use delta_kernel::plans::ir::{
-        nodes::Values,
-        plan::{Plan, PlanNode},
-    };
+    use delta_kernel::plans::ir::nodes::Values;
+    use delta_kernel::plans::ir::plan::{Plan, PlanNode};
     use delta_kernel::tasks::{PlanShape, Resource, TaskLimits};
     use prost::Message;
     let schema = Arc::new(

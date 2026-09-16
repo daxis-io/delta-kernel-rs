@@ -182,11 +182,12 @@ pub(crate) fn provider_layout() -> std::alloc::Layout {
 
 #[cfg(test)]
 mod many_file_tests {
-    use super::*;
-    use crate::closed_plan_facts::ClosedPlanFacts;
     use delta_kernel::expressions::Scalar;
     use delta_kernel::plans::ir::nodes::Operator;
     use delta_kernel::tasks::{AdmittedPlan, FileDescriptor, ObjectIdentity, Resource, TaskLimits};
+
+    use super::*;
+    use crate::closed_plan_facts::ClosedPlanFacts;
 
     fn admitted(count: usize) -> AdmittedPlan {
         crate::log_store::tests::admitted_plan(

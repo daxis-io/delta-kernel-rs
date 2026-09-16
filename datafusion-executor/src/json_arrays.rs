@@ -726,9 +726,10 @@ fn unsupported() -> OperationFailure {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) mod tests {
-    use super::*;
     use std::alloc::{GlobalAlloc, System};
     use std::cell::Cell;
+
+    use super::*;
 
     // Regression detector only, not the allocation envelope: the latter is derived above
     // before any decoder construction. Thread-local counting isolates concurrent lib tests.
@@ -877,7 +878,8 @@ pub(crate) mod tests {
     #[test]
     fn one_row_merge_preflight_and_filter_paths() {
         use datafusion::arrow::array::{new_null_array, Array};
-        use datafusion::arrow::compute::{filter_record_batch, kernels::merge::merge};
+        use datafusion::arrow::compute::filter_record_batch;
+        use datafusion::arrow::compute::kernels::merge::merge;
         let schema = Arc::new(nested_schema());
         let data_type = DataType::Struct(schema.fields().clone());
         let limits = TaskLimits::qualification();
