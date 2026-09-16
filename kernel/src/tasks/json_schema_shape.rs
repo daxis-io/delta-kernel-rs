@@ -180,13 +180,14 @@ impl PrimitiveSchemaShape {
         // unpartitioned projections. The initial decoder is charged separately;
         // the other three use new_unchecked (no lowercase validation set).
         let clones = schema_owner.checked_mul(3)?;
+        // Includes the logical Schema Arc.
         let initial = self
             .materialization_bytes(metadata.schema_string().len())?
-            .checked_add(2 * size_of::<usize>())?; // logical Schema Arc
-                                                   // MakePhysical has one root sibling frame and primitive path depth one.
-                                                   // Mapping mode is None for the admitted reader protocol1, so its ID and
-                                                   // sibling maps stay empty. map_owned_children_or_else owns Cow and owned
-                                                   // field Vecs before new_unchecked moves fields into the physical index.
+            .checked_add(2 * size_of::<usize>())?;
+        // MakePhysical has one root sibling frame and primitive path depth one.
+        // Mapping mode is None for the admitted reader protocol1, so its ID and
+        // sibling maps stay empty. map_owned_children_or_else owns Cow and owned
+        // field Vecs before new_unchecked moves fields into the physical index.
         let transform = vector_peak::<Cow<'static, StructField>>(self.fields)?
             .checked_add(vector_peak::<StructField>(self.fields)?)?
             .checked_add(vector_peak::<HashMap<&str, &str>>(1)?)?

@@ -243,7 +243,8 @@ fn nanos_native_creation_and_snapshot_roundtrip(
     let (_directory, path, engine) = test_utils::test_table_setup()?;
     create_table(&path, schema.clone(), "PhaseD/nanos")
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
-        .commit(engine.as_ref())?;
+        .commit(engine.as_ref())?
+        .unwrap_committed();
     let snapshot = delta_kernel::Snapshot::builder_for(&path).build(engine.as_ref())?;
     assert_eq!(snapshot.version(), 0);
     assert_eq!(snapshot.schema().as_ref(), schema.as_ref());

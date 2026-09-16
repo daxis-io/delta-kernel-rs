@@ -353,6 +353,13 @@ impl<'a> GetData<'a> for RunArray<Int64Type> {
     }
 }
 
+#[cfg(feature = "nanosecond-timestamps")]
+impl GetData<'_> for PrimitiveArray<TimestampNanosecondType> {
+    fn get_timestamp(&self, row_index: usize, _field_name: &str) -> DeltaResult<Option<i64>> {
+        Ok(self.is_valid(row_index).then(|| self.value(row_index)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
@@ -616,12 +623,5 @@ mod tests {
         let float_array = Float32Array::from(vec![Some(1.0f32)]);
         assert!(float_array.get_int(0, "f").is_err());
         assert!(float_array.get_double(0, "f").is_err());
-    }
-}
-
-#[cfg(feature = "nanosecond-timestamps")]
-impl GetData<'_> for PrimitiveArray<TimestampNanosecondType> {
-    fn get_timestamp(&self, row_index: usize, _field_name: &str) -> DeltaResult<Option<i64>> {
-        Ok(self.is_valid(row_index).then(|| self.value(row_index)))
     }
 }

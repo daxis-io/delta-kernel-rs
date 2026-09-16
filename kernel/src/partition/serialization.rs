@@ -244,6 +244,20 @@ fn format_binary(bytes: &[u8]) -> DeltaResult<String> {
         .map_err(|e| Error::generic(format!("binary partition value is not valid UTF-8: {e}")))
 }
 
+#[cfg(feature = "nanosecond-timestamps")]
+fn format_timestamp_nanos(nanos: i64) -> DeltaResult<String> {
+    DateTime::from_timestamp(
+        nanos.div_euclid(1_000_000_000),
+        nanos.rem_euclid(1_000_000_000) as u32,
+    )
+    .ok_or_else(|| {
+        Error::generic(format!(
+            "timetamps value {nanos} nanoseconds from epoch is out of range"
+        ))
+    })
+    .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S%.9fZ").to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
@@ -641,18 +655,4 @@ mod tests {
         .unwrap();
         assert!(serialize_partition_value(&Scalar::Map(data)).is_err());
     }
-}
-
-#[cfg(feature = "nanosecond-timestamps")]
-fn format_timestamp_nanos(nanos: i64) -> DeltaResult<String> {
-    DateTime::from_timestamp(
-        nanos.div_euclid(1_000_000_000),
-        nanos.rem_euclid(1_000_000_000) as u32,
-    )
-    .ok_or_else(|| {
-        Error::generic(format!(
-            "timetamps value {nanos} nanoseconds from epoch is out of range"
-        ))
-    })
-    .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S%.9fZ").to_string())
 }

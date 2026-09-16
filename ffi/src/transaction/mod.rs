@@ -89,6 +89,7 @@ fn transaction_impl(
 ) -> DeltaResult<Handle<ExclusiveTransaction>> {
     let engine = extern_engine.engine();
     let snapshot = Snapshot::builder_for(url?).build(engine.as_ref())?;
+    crate::schema::validate_schema_v1(&snapshot.schema())?;
     let committer = Box::new(FileSystemCommitter::new());
     let transaction = snapshot.transaction(committer, engine.as_ref());
     Ok(Box::new(transaction?).into())
@@ -117,6 +118,7 @@ fn transaction_with_committer_impl(
     extern_engine: &dyn ExternEngine,
     committer: Box<dyn Committer>,
 ) -> DeltaResult<Handle<ExclusiveTransaction>> {
+    crate::schema::validate_schema_v1(&snapshot.schema())?;
     let engine = extern_engine.engine();
     let transaction = snapshot.transaction(committer, engine.as_ref());
     Ok(Box::new(transaction?).into())

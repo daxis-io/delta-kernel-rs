@@ -29,7 +29,8 @@ the caller's memory space.
 - `src/handle.rs` -- opaque handle system for passing Rust objects across FFI
 - `src/column_default.rs` -- column-default (`allowColumnDefaults`) reads and the write-path ack
 - `src/scan.rs` -- scan FFI interface
-- `src/schema_visitor.rs` -- visitor pattern for schema traversal
+- `src/schema.rs` -- outgoing V1/V2 schema visitors (V1 C layout remains unchanged)
+- `src/schema_visitor.rs` -- incoming legacy schema construction; rejects unsupported V1 types
 - `src/ffi_tracing.rs` -- log/tracing and metrics callback registration (`#[cfg(feature = "tracing")]`)
 - `src/ffi_metrics.rs` -- `repr(C)` mirror of kernel `MetricEvent` types (`#[cfg(feature = "tracing")]`)
 - `src/alloc_stats.rs` -- `peak_alloc` global allocator and native-heap FFI getters
@@ -252,3 +253,13 @@ Guidance for adding or triaging FFI tests:
   not weaken detection. Do NOT add `-Zmiri-disable-stacked-borrows`, `-disable-validation`,
   `-disable-data-race-detector`, or `-Zmiri-preemption-rate=0`: the first three are unsound, and
   the last reduces data-race schedule exploration.
+
+## Versioned schema compatibility
+
+Legacy admissions reject schemas/scalars that the V1 visitors cannot represent before returning
+handles or writing. Rust-fabricated legacy handles and raw-reference visitors require the same
+recursive V1 restriction. V2 visitors preflight all inputs; ParseJSON uses a distinct V2 schema
+handle. Nanosecond scalar/null callbacks are not exposed and V2 rejects them before callbacks.
+
+Verify both `cargo test -p delta_kernel_ffi --locked` and the dependency-feature-unification lane
+`cargo test -p delta_kernel_ffi --locked --features delta_kernel/nanosecond-timestamps`.
