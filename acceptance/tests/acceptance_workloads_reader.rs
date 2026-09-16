@@ -203,10 +203,6 @@ const EXPECTED_KERNEL_FAILURES: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "Accepts truncated log when initial commits are missing but CRC files exist",
-        &["prod_truncated_log/"],
-    ),
-    (
         "Accepts checkpoint-only tables (no commits)",
         &["cp_checkpoint_only_table/specs/cp_checkpoint_only_table_error"],
     ),
@@ -264,10 +260,6 @@ const EXPECTED_KERNEL_FAILURES: &[(&str, &[&str])] = &[
             "err_schema_empty/specs/err_schema_empty_error",
             "err_schema_invalid_json_error",
         ],
-    ),
-    (
-        "Does not require version 0 to exist",
-        &["err_missing_version_0/specs/err_missing_version_0_error"],
     ),
     (
         "Does not reject unknown reader features",
