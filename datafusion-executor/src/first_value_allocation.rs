@@ -80,7 +80,8 @@ pub(crate) fn state_type_peak(
         total = total.checked_add(vec_peak(3, scalar)?)?;
         // Group result capacity is remaining_groups+2, not ordering_arity+2.
         total = total.checked_add(vec_peak(rows.checked_add(2)?, size_of::<ArrayRef>())?)?;
-        total = total.checked_add(vec_peak(rows, word)?.checked_mul(2)?)?; // extreme indices + split
+        // Extreme indices and split.
+        total = total.checked_add(vec_peak(rows, word)?.checked_mul(2)?)?;
         total = total.checked_add(vec_peak(rows, size_of::<(usize, usize)>())?)?;
         // is_sets, extreme validity, emitted flag backing and rebuilt remaining
         // flags can coexist. BooleanBufferBuilder uses aligned MutableBuffer.

@@ -95,13 +95,13 @@ pub(crate) fn preflight(
         return Err(OperationFailure::malformed_response());
     }
     let mut b = Bound { bytes: 0, limits };
-    let physical_nodes = f.nodes + 2; // ScanJson schema-order projection + second aggregate stage.
-                                      // Per path component: accessor function and field-name literal (root Column
-                                      // replaces these at component0). Constructed fields include every patch
-                                      // pass-through and generated name/value pair; root outputs add cast/alias.
-                                      // Four extra leaves
-                                      // per aggregate cover cloned ordering key and its generated boolean filter;
-                                      // the full twelve also covers the aggregate, alias and state output Columns.
+    // ScanJson schema-order projection and second aggregate stage.
+    let physical_nodes = f.nodes + 2;
+    // Per path component: accessor function and field-name literal (root Column
+    // replaces these at component0). Constructed fields include every patch
+    // pass-through and generated name/value pair; root outputs add cast/alias.
+    // Four extra leaves per aggregate cover cloned ordering key and its generated
+    // boolean filter; the full twelve also covers the aggregate, alias and state output Columns.
     let base = f
         .expressions
         .checked_add(
