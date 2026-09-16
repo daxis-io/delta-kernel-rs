@@ -609,7 +609,8 @@ impl TaskState for SnapshotState {
                         .checked_mul(2)
                         .and_then(|n| n.checked_add(1))
                         .ok_or_else(|| exhausted(Resource::WorkUnits, &self.limits))?;
-                    accounting.charge(Resource::WorkUnits, work)?; // prefix and predecessor comparison
+                    // Prefix and predecessor comparison.
+                    accounting.charge(Resource::WorkUnits, work)?;
                     if !file.path.starts_with(&self.log_root)
                         || previous.is_some_and(|p| p >= file.path.as_str())
                     {
