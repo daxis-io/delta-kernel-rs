@@ -1,6 +1,7 @@
 //! Defines [`EngineExpressionVisitor`]. This is a visitor that can be used to convert the kernel's
 //! [`Expression`] or [`Predicate`] to an engine's native expression format.
 use std::ffi::c_void;
+use std::ops::{Deref, DerefMut};
 
 use delta_kernel::expressions::{
     ArrayData, BinaryExpression, BinaryExpressionOp, BinaryPredicate, BinaryPredicateOp,
@@ -10,13 +11,19 @@ use delta_kernel::expressions::{
     UnaryExpression, UnaryExpressionOp, UnaryPredicate, UnaryPredicateOp, VariadicExpression,
     VariadicExpressionOp,
 };
+use delta_kernel::transforms::{transform_output_type, ExpressionTransform, SchemaTransform};
+use delta_kernel::DeltaResult;
 
 use super::kernel_visitor::NullTypeTag;
+use crate::error::{ExternResult, IntoExternResult};
 use crate::expressions::{
     SharedExpression, SharedOpaqueExpressionOp, SharedOpaquePredicateOp, SharedPredicate,
 };
 use crate::handle::Handle;
-use crate::{kernel_string_slice, KernelStringSlice, SharedSchema};
+use crate::schema::SchemaCompatibility;
+use crate::{
+    kernel_string_slice, AllocateErrorFn, KernelStringSlice, SharedSchema, SharedSchemaV2,
+};
 
 type VisitLiteralFn<T> = extern "C" fn(data: *mut c_void, sibling_list_id: usize, value: T);
 type VisitUnaryFn = extern "C" fn(data: *mut c_void, sibling_list_id: usize, child_list_id: usize);
@@ -277,6 +284,147 @@ pub struct EngineExpressionVisitor {
         extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
 }
 
+/// Additive expression visitor with a distinct callback and handle for ParseJSON schemas.
+#[repr(C)]
+pub struct EngineExpressionVisitorV2 {
+    /// Unchanged V1 callbacks, used for every other expression node.
+    pub v1: EngineExpressionVisitor,
+    /// Visit ParseJSON with a caller-owned V2 schema; release it with `free_schema_v2`.
+    pub visit_parse_json: extern "C" fn(*mut c_void, usize, usize, Handle<SharedSchemaV2>),
+}
+
+type VisitParseJsonV2Fn = extern "C" fn(*mut c_void, usize, usize, Handle<SharedSchemaV2>);
+
+struct VisitorContext<'a> {
+    v1: &'a mut EngineExpressionVisitor,
+    parse_json_v2: Option<VisitParseJsonV2Fn>,
+}
+impl Deref for VisitorContext<'_> {
+    type Target = EngineExpressionVisitor;
+    fn deref(&self) -> &Self::Target {
+        self.v1
+    }
+}
+impl DerefMut for VisitorContext<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.v1
+    }
+}
+
+pub(crate) struct ExpressionCompatibility(pub(crate) bool);
+impl<'a> ExpressionTransform<'a> for ExpressionCompatibility {
+    transform_output_type!(|'a, T| DeltaResult<()>);
+
+    fn transform_expr_literal(&mut self, scalar: &'a Scalar) -> DeltaResult<()> {
+        fn validate(scalar: &Scalar) -> DeltaResult<()> {
+            // V2 extends schemas only: neither visitor has nanosecond scalar callbacks.
+            SchemaCompatibility(false).transform(&scalar.data_type())?;
+            match scalar {
+                Scalar::Struct(data) => data.values().iter().try_for_each(validate),
+                Scalar::Array(data) => data.array_elements().iter().try_for_each(validate),
+                Scalar::Map(data) => data.pairs().iter().try_for_each(|(k, v)| {
+                    validate(k)?;
+                    validate(v)
+                }),
+                _ => Ok(()),
+            }
+        }
+        validate(scalar)
+    }
+
+    fn transform_expr_parse_json(&mut self, expr: &'a ParseJsonExpression) -> DeltaResult<()> {
+        SchemaCompatibility(self.0).transform_struct(&expr.output_schema)?;
+        self.recurse_into_expr_parse_json(expr)
+    }
+
+    fn transform_expr_struct_patch(&mut self, patch: &'a ExpressionStructPatch) -> DeltaResult<()> {
+        for expr in patch
+            .prepended_fields
+            .iter()
+            .chain(&patch.appended_fields)
+            .chain(
+                patch
+                    .field_patches
+                    .values()
+                    .flat_map(|field| &field.insertions),
+            )
+        {
+            self.transform_expr(expr)?;
+        }
+        Ok(())
+    }
+
+    fn transform_expr_cast(
+        &mut self,
+        expr: &'a delta_kernel::expressions::CastExpression,
+    ) -> DeltaResult<()> {
+        SchemaCompatibility(false).transform(&expr.target)?;
+        self.recurse_into_expr_cast(expr)
+    }
+}
+
+pub(crate) fn validate_expression_v1(expr: &Expression) -> DeltaResult<()> {
+    ExpressionCompatibility(false).transform_expr(expr)
+}
+pub(crate) fn validate_predicate_v1(pred: &Predicate) -> DeltaResult<()> {
+    ExpressionCompatibility(false).transform_pred(pred)
+}
+
+/// Visit an expression with V2 ParseJSON schemas, returning a list ID or a typed error.
+/// The whole expression is checked before any visitor callback or list allocation.
+/// Nanosecond literals and typed nulls are unsupported by the scalar callbacks.
+///
+/// # Safety
+/// The expression reference, visitor callbacks/state, and error allocator must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn visit_expression_ref_v2(
+    expression: &Expression,
+    visitor: &mut EngineExpressionVisitorV2,
+    allocate_error: AllocateErrorFn,
+) -> ExternResult<usize> {
+    ExpressionCompatibility(true)
+        .transform_expr(expression)
+        .map(|()| {
+            let mut context = VisitorContext {
+                v1: &mut visitor.v1,
+                parse_json_v2: Some(visitor.visit_parse_json),
+            };
+            let top = call_context_make_list(&context);
+            visit_expression_impl(&mut context, expression, top);
+            top
+        })
+        .into_extern_result(&allocate_error)
+}
+
+/// Visit a predicate with V2 ParseJSON schemas, returning a list ID or a typed error.
+/// Preflight occurs before any callback, including for nested nanosecond literals/nulls.
+///
+/// # Safety
+/// The predicate reference, visitor callbacks/state, and error allocator must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn visit_predicate_ref_v2(
+    predicate: &Predicate,
+    visitor: &mut EngineExpressionVisitorV2,
+    allocate_error: AllocateErrorFn,
+) -> ExternResult<usize> {
+    ExpressionCompatibility(true)
+        .transform_pred(predicate)
+        .map(|()| {
+            let mut context = VisitorContext {
+                v1: &mut visitor.v1,
+                parse_json_v2: Some(visitor.visit_parse_json),
+            };
+            let top = call_context_make_list(&context);
+            visit_predicate_impl(&mut context, predicate, top);
+            top
+        })
+        .into_extern_result(&allocate_error)
+}
+
+fn call_context_make_list(visitor: &VisitorContext<'_>) -> usize {
+    (visitor.make_field_list)(visitor.data, 1)
+}
+
 /// Visit the expression of the passed [`SharedExpression`] Handle using the provided `visitor`.
 /// See the documentation of [`EngineExpressionVisitor`] for a description of how this visitor
 /// works.
@@ -301,7 +449,9 @@ pub unsafe extern "C" fn visit_expression(
 ///
 /// # Safety
 ///
-/// The caller must pass a valid Expression pointer and expression visitor
+/// The caller must pass a valid Expression pointer and visitor. Every nested schema and
+/// scalar must be V1-representable, including ParseJSON outputs and typed nulls. Use the
+/// fallible `visit_expression_ref_v2` for inputs that may contain nanosecond types.
 #[no_mangle]
 pub unsafe extern "C" fn visit_expression_ref(
     expression: &Expression,
@@ -334,7 +484,9 @@ pub unsafe extern "C" fn visit_predicate(
 ///
 /// # Safety
 ///
-/// The caller must pass a valid Predicate pointer and expression visitor
+/// The caller must pass a valid Predicate pointer and visitor. Every nested schema and
+/// scalar must be V1-representable. Use `visit_predicate_ref_v2` for inputs that may
+/// contain nanosecond types.
 #[no_mangle]
 pub unsafe extern "C" fn visit_predicate_ref(
     predicate: &Predicate,
@@ -350,7 +502,7 @@ macro_rules! call {
 }
 
 fn visit_expression_array(
-    visitor: &mut EngineExpressionVisitor,
+    visitor: &mut VisitorContext<'_>,
     array: &ArrayData,
     sibling_list_id: usize,
 ) {
@@ -363,7 +515,7 @@ fn visit_expression_array(
 }
 
 fn visit_expression_map(
-    visitor: &mut EngineExpressionVisitor,
+    visitor: &mut VisitorContext<'_>,
     map_data: &MapData,
     sibling_list_id: usize,
 ) {
@@ -384,7 +536,7 @@ fn visit_expression_map(
 }
 
 fn visit_expression_struct_literal(
-    visitor: &mut EngineExpressionVisitor,
+    visitor: &mut VisitorContext<'_>,
     struct_data: &StructData,
     sibling_list_id: usize,
 ) {
@@ -410,7 +562,7 @@ fn visit_expression_struct_literal(
 }
 
 fn visit_expression_column(
-    visitor: &mut EngineExpressionVisitor,
+    visitor: &mut VisitorContext<'_>,
     name: &ColumnName,
     sibling_list_id: usize,
 ) {
@@ -429,7 +581,7 @@ fn visit_expression_column(
 }
 
 fn visit_expression_struct(
-    visitor: &mut EngineExpressionVisitor,
+    visitor: &mut VisitorContext<'_>,
     exprs: &[ExpressionRef],
     sibling_list_id: usize,
 ) {
@@ -437,7 +589,7 @@ fn visit_expression_struct(
     call!(visitor, visit_struct_expr, sibling_list_id, child_list_id)
 }
 
-fn visit_expression_list(visitor: &mut EngineExpressionVisitor, exprs: &[ExpressionRef]) -> usize {
+fn visit_expression_list(visitor: &mut VisitorContext<'_>, exprs: &[ExpressionRef]) -> usize {
     let child_list_id = call!(visitor, make_field_list, exprs.len());
     for expr in exprs {
         visit_expression_impl(visitor, expr, child_list_id);
@@ -446,7 +598,7 @@ fn visit_expression_list(visitor: &mut EngineExpressionVisitor, exprs: &[Express
 }
 
 fn visit_expression_struct_patch(
-    visitor: &mut EngineExpressionVisitor,
+    visitor: &mut VisitorContext<'_>,
     patch: &ExpressionStructPatch,
     sibling_list_id: usize,
 ) {
@@ -489,7 +641,7 @@ fn visit_expression_struct_patch(
 }
 
 fn visit_expression_opaque(
-    visitor: &mut EngineExpressionVisitor,
+    visitor: &mut VisitorContext<'_>,
     op: &OpaqueExpressionOpRef,
     exprs: &[Expression],
     sibling_list_id: usize,
@@ -509,7 +661,7 @@ fn visit_expression_opaque(
 }
 
 fn visit_predicate_junction(
-    visitor: &mut EngineExpressionVisitor,
+    visitor: &mut VisitorContext<'_>,
     op: &JunctionPredicateOp,
     preds: &[Predicate],
     sibling_list_id: usize,
@@ -527,7 +679,7 @@ fn visit_predicate_junction(
 }
 
 fn visit_predicate_opaque(
-    visitor: &mut EngineExpressionVisitor,
+    visitor: &mut VisitorContext<'_>,
     op: &OpaquePredicateOpRef,
     exprs: &[Expression],
     sibling_list_id: usize,
@@ -546,7 +698,7 @@ fn visit_predicate_opaque(
     );
 }
 
-fn visit_unknown(visitor: &mut EngineExpressionVisitor, sibling_list_id: usize, name: &str) {
+fn visit_unknown(visitor: &mut VisitorContext<'_>, sibling_list_id: usize, name: &str) {
     call!(
         visitor,
         visit_unknown,
@@ -556,7 +708,7 @@ fn visit_unknown(visitor: &mut EngineExpressionVisitor, sibling_list_id: usize, 
 }
 
 fn visit_expression_scalar(
-    visitor: &mut EngineExpressionVisitor,
+    visitor: &mut VisitorContext<'_>,
     scalar: &Scalar,
     sibling_list_id: usize,
 ) {
@@ -637,7 +789,7 @@ fn visit_expression_scalar(
 }
 
 fn visit_expression_impl(
-    visitor: &mut EngineExpressionVisitor,
+    visitor: &mut VisitorContext<'_>,
     expression: &Expression,
     sibling_list_id: usize,
 ) {
@@ -689,14 +841,22 @@ fn visit_expression_impl(
         }) => {
             let child_list_id = call!(visitor, make_field_list, 1);
             visit_expression_impl(visitor, json_expr, child_list_id);
-            let schema_handle = Handle::from(output_schema.clone());
-            call!(
-                visitor,
-                visit_parse_json,
-                sibling_list_id,
-                child_list_id,
-                schema_handle
-            );
+            if let Some(callback) = visitor.parse_json_v2 {
+                callback(
+                    visitor.data,
+                    sibling_list_id,
+                    child_list_id,
+                    output_schema.clone().into(),
+                );
+            } else {
+                call!(
+                    visitor,
+                    visit_parse_json,
+                    sibling_list_id,
+                    child_list_id,
+                    Handle::from(output_schema.clone())
+                );
+            }
         }
         Expression::MapToStruct(MapToStructExpression { map_expr }) => {
             let child_list_id = call!(visitor, make_field_list, 1);
@@ -714,7 +874,7 @@ fn visit_expression_impl(
 }
 
 fn visit_predicate_impl(
-    visitor: &mut EngineExpressionVisitor,
+    visitor: &mut VisitorContext<'_>,
     predicate: &Predicate,
     sibling_list_id: usize,
 ) {
@@ -761,13 +921,21 @@ fn visit_expression_internal(
     visitor: &mut EngineExpressionVisitor,
 ) -> usize {
     let top_level = call!(visitor, make_field_list, 1);
-    visit_expression_impl(visitor, expression, top_level);
+    let mut context = VisitorContext {
+        v1: visitor,
+        parse_json_v2: None,
+    };
+    visit_expression_impl(&mut context, expression, top_level);
     top_level
 }
 
 fn visit_predicate_internal(predicate: &Predicate, visitor: &mut EngineExpressionVisitor) -> usize {
     let top_level = call!(visitor, make_field_list, 1);
-    visit_predicate_impl(visitor, predicate, top_level);
+    let mut context = VisitorContext {
+        v1: visitor,
+        parse_json_v2: None,
+    };
+    visit_predicate_impl(&mut context, predicate, top_level);
     top_level
 }
 
@@ -779,8 +947,171 @@ mod tests {
     use super::*;
     use crate::TryFromStringSlice;
 
+    #[test]
+    fn nanosecond_struct_patch_insertions_and_casts_fail_before_list_allocation() {
+        use delta_kernel::expressions::ExpressionStructPatchBuilder;
+
+        use crate::ffi_test_utils::{allocate_err, assert_extern_result_error_with_message};
+        let Ok(nano) =
+            serde_json::from_str::<delta_kernel::schema::DataType>("\"timestamp_nanos\"")
+        else {
+            return;
+        };
+        let input = || lit(Scalar::Null(nano.clone()));
+        let expressions = [
+            Expression::struct_patch(ExpressionStructPatchBuilder::new().prepend(input())).unwrap(),
+            Expression::struct_patch(ExpressionStructPatchBuilder::new().append(input())).unwrap(),
+            Expression::struct_patch(
+                ExpressionStructPatchBuilder::new().insert_after("a", input()),
+            )
+            .unwrap(),
+            Expression::cast(lit(1), nano),
+        ];
+        for expr in expressions {
+            let mut builder = TestExpressionBuilder::default();
+            let mut visitor = EngineExpressionVisitorV2 {
+                v1: test_visitor(&mut builder),
+                visit_parse_json: ignore_parse_json_v2,
+            };
+            assert!(validate_expression_v1(&expr).is_err());
+            let result = unsafe { visit_expression_ref_v2(&expr, &mut visitor, allocate_err) };
+            assert_extern_result_error_with_message(
+                result,
+                crate::error::KernelError::UnsupportedError,
+                None,
+            );
+            assert_eq!(builder.next_list_id, 0);
+        }
+    }
+
+    #[test]
+    fn versioned_parse_json_preserves_nanosecond_schema_and_frees_callback_handle() {
+        let Ok(nano) =
+            serde_json::from_str::<delta_kernel::schema::DataType>("\"timestamp_nanos\"")
+        else {
+            return;
+        };
+        let schema = std::sync::Arc::new(delta_kernel::schema::StructType::new_unchecked([
+            delta_kernel::schema::StructField::new("nano", nano, false),
+        ]));
+        let expression = Expression::ParseJson(ParseJsonExpression {
+            json_expr: Box::new(lit("{}")),
+            output_schema: schema.clone(),
+        });
+        assert!(matches!(
+            validate_expression_v1(&expression),
+            Err(delta_kernel::Error::Unsupported(_))
+        ));
+        let mut builder = TestExpressionBuilder::default();
+        let mut visitor = EngineExpressionVisitorV2 {
+            v1: test_visitor(&mut builder),
+            visit_parse_json: collect_parse_json_v2,
+        };
+        let top = crate::ffi_test_utils::ok_or_panic(unsafe {
+            visit_expression_ref_v2(
+                &expression,
+                &mut visitor,
+                crate::ffi_test_utils::allocate_err,
+            )
+        });
+        assert_eq!(top, 0);
+        assert_eq!(builder.next_list_id, 2);
+        assert_eq!(
+            builder.events,
+            vec![LiteralEvent::ParseJson {
+                list: 0,
+                child: 1,
+                schema: serde_json::to_string(schema.as_ref()).unwrap(),
+            }]
+        );
+        assert_eq!(std::sync::Arc::strong_count(&schema), 2);
+        // Predicate recursion must use the same V2 callback rather than exposing a V1 schema.
+        let predicate = Predicate::Not(Box::new(Predicate::BooleanExpression(expression)));
+        crate::ffi_test_utils::ok_or_panic(unsafe {
+            visit_predicate_ref_v2(
+                &predicate,
+                &mut visitor,
+                crate::ffi_test_utils::allocate_err,
+            )
+        });
+        assert_eq!(builder.events.len(), 2);
+        assert_eq!(std::sync::Arc::strong_count(&schema), 2);
+    }
+
+    extern "C" fn collect_parse_json_v2(
+        data: *mut c_void,
+        list: usize,
+        child: usize,
+        schema: Handle<SharedSchemaV2>,
+    ) {
+        let builder = unsafe { &mut *(data as *mut TestExpressionBuilder) };
+        builder.events.push(LiteralEvent::ParseJson {
+            list,
+            child,
+            schema: serde_json::to_string(unsafe { schema.as_ref() }).unwrap(),
+        });
+        unsafe { crate::free_schema_v2(schema) };
+    }
+
+    #[test]
+    fn fallible_visitors_reject_nanosecond_literals_before_allocating_lists() {
+        use crate::error::KernelError;
+        use crate::ffi_test_utils::{allocate_err, assert_extern_result_error_with_message};
+        let Ok(nano) =
+            serde_json::from_str::<delta_kernel::schema::DataType>("\"timestamp_nanos\"")
+        else {
+            // Exercised in the mandatory dependency-feature-unification test lane.
+            return;
+        };
+        let values = [
+            Scalar::Null(nano.clone()),
+            serde_json::from_value::<Scalar>(serde_json::json!({"TimestampNanos": 123})).unwrap(),
+            Scalar::Array(
+                ArrayData::try_new(
+                    delta_kernel::schema::ArrayType::new(nano, true),
+                    [
+                        serde_json::from_value::<Scalar>(
+                            serde_json::json!({"TimestampNanos": 123}),
+                        )
+                        .unwrap(),
+                    ],
+                )
+                .unwrap(),
+            ),
+        ];
+        for value in values {
+            let expr = Expression::literal(value);
+            let mut builder = TestExpressionBuilder::default();
+            let mut visitor = EngineExpressionVisitorV2 {
+                v1: test_visitor(&mut builder),
+                visit_parse_json: ignore_parse_json_v2,
+            };
+            let result = unsafe { visit_expression_ref_v2(&expr, &mut visitor, allocate_err) };
+            assert_extern_result_error_with_message(result, KernelError::UnsupportedError, None);
+            assert_eq!(builder.next_list_id, 0);
+            let predicate = Predicate::BooleanExpression(expr);
+            let result = unsafe { visit_predicate_ref_v2(&predicate, &mut visitor, allocate_err) };
+            assert_extern_result_error_with_message(result, KernelError::UnsupportedError, None);
+            assert_eq!(builder.next_list_id, 0);
+        }
+    }
+
+    extern "C" fn ignore_parse_json_v2(
+        _data: *mut c_void,
+        _list: usize,
+        _child: usize,
+        schema: Handle<crate::SharedSchemaV2>,
+    ) {
+        unsafe { crate::free_schema_v2(schema) };
+    }
+
     #[derive(Debug, PartialEq, Eq)]
     enum LiteralEvent {
+        ParseJson {
+            list: usize,
+            child: usize,
+            schema: String,
+        },
         IntervalYearMonth {
             sibling_list_id: usize,
             value: i32,

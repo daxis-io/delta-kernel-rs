@@ -1,10 +1,15 @@
 use std::os::raw::c_void;
 
 use delta_kernel::schema::{ArrayType, DataType, MapType, PrimitiveType, StructType};
+use delta_kernel::transforms::{transform_output_type, SchemaTransform};
+use delta_kernel::{DeltaResult, Error};
 
+use crate::error::{ExternResult, IntoExternResult};
 use crate::handle::Handle;
 use crate::scan::CMetadataMap;
-use crate::{kernel_string_slice, KernelStringSlice, SharedSchema};
+use crate::{
+    kernel_string_slice, AllocateErrorFn, KernelStringSlice, SharedSchema, SharedSchemaV2,
+};
 
 /// The `EngineSchemaVisitor` defines a visitor system to allow engines to build their own
 /// representation of a schema from a particular schema within kernel.
@@ -258,6 +263,85 @@ pub struct EngineSchemaVisitor {
     ),
 }
 
+/// Additive schema visitor. The V1 visitor layout and callbacks remain unchanged.
+#[repr(C)]
+pub struct EngineSchemaVisitorV2 {
+    /// Callbacks for types supported by V1, including list allocation.
+    pub v1: EngineSchemaVisitor,
+    /// Visit an additional primitive, currently `timestamp_nanos`, using its exact Delta token.
+    /// All string slices and metadata are borrowed only for the duration of this callback.
+    pub visit_primitive: extern "C" fn(
+        data: *mut c_void,
+        sibling_list_id: usize,
+        name: KernelStringSlice,
+        is_nullable: bool,
+        metadata: &CMetadataMap,
+        type_name: KernelStringSlice,
+    ),
+}
+
+type VisitPrimitiveFn =
+    extern "C" fn(*mut c_void, usize, KernelStringSlice, bool, &CMetadataMap, KernelStringSlice);
+
+pub(crate) struct SchemaCompatibility(pub(crate) bool);
+
+impl<'a> SchemaTransform<'a> for SchemaCompatibility {
+    transform_output_type!(|'a, T| DeltaResult<()>);
+
+    fn transform_primitive(&mut self, primitive: &'a PrimitiveType) -> DeltaResult<()> {
+        // Kernel dependency feature unification can enable types without an FFI-local flag.
+        #[allow(unreachable_patterns)]
+        match primitive {
+            PrimitiveType::String
+            | PrimitiveType::Long
+            | PrimitiveType::Integer
+            | PrimitiveType::Short
+            | PrimitiveType::Byte
+            | PrimitiveType::Float
+            | PrimitiveType::Double
+            | PrimitiveType::Boolean
+            | PrimitiveType::Binary
+            | PrimitiveType::Date
+            | PrimitiveType::Timestamp
+            | PrimitiveType::TimestampNtz
+            | PrimitiveType::Void
+            | PrimitiveType::IntervalYearMonth
+            | PrimitiveType::IntervalDayTime
+            | PrimitiveType::Decimal(_) => Ok(()),
+            #[cfg(feature = "geo-type-in-dev")]
+            PrimitiveType::Geometry(_) | PrimitiveType::Geography(_) => Ok(()),
+            other if self.0 && other.to_string() == "timestamp_nanos" => Ok(()),
+            other => Err(Error::unsupported(format!(
+                "C schema visitor does not support {other}"
+            ))),
+        }
+    }
+}
+
+pub(crate) fn validate_schema_v1(schema: &StructType) -> DeltaResult<()> {
+    SchemaCompatibility(false).transform_struct(schema)
+}
+
+/// Visit a V2 schema, returning the top-level list ID or a typed error.
+/// The entire schema is checked before allocating lists or invoking visitor callbacks.
+///
+/// # Safety
+/// The schema handle and all visitor callbacks/state must be valid for this call.
+/// The schema is borrowed; the caller retains ownership and releases it with `free_schema_v2`.
+#[no_mangle]
+pub unsafe extern "C" fn visit_schema_v2(
+    schema: Handle<SharedSchemaV2>,
+    visitor: &mut EngineSchemaVisitorV2,
+    allocate_error: AllocateErrorFn,
+) -> ExternResult<usize> {
+    visit_schema_impl(
+        unsafe { schema.as_ref() },
+        &mut visitor.v1,
+        Some(visitor.visit_primitive),
+    )
+    .into_extern_result(&allocate_error)
+}
+
 /// Visit the given `schema` using the provided `visitor`. See the documentation of
 /// [`EngineSchemaVisitor`] for a description of how this visitor works.
 ///
@@ -265,19 +349,30 @@ pub struct EngineSchemaVisitor {
 ///
 /// # Safety
 ///
-/// Caller is responsible for passing a valid schema handle and schema visitor.
+/// Caller must pass a valid V1 schema handle and visitor. Schemas fabricated from Rust must
+/// recursively contain only V1-supported types; use `visit_schema_v2` for nanosecond schemas.
 #[no_mangle]
 pub unsafe extern "C" fn visit_schema(
     schema: Handle<SharedSchema>,
     visitor: &mut EngineSchemaVisitor,
 ) -> usize {
     let schema = unsafe { schema.as_ref() };
-    visit_schema_impl(schema, visitor)
+    // SAFETY: library admissions enforce V1 compatibility; fabricated handles must do so too.
+    unsafe { visit_schema_impl(schema, visitor, None).unwrap_unchecked() }
 }
 
-fn visit_schema_impl(schema: &StructType, visitor: &mut EngineSchemaVisitor) -> usize {
+fn visit_schema_impl(
+    schema: &StructType,
+    visitor: &mut EngineSchemaVisitor,
+    primitive: Option<VisitPrimitiveFn>,
+) -> DeltaResult<usize> {
+    SchemaCompatibility(primitive.is_some()).transform_struct(schema)?;
     // Visit all the fields of a struct and return the list of children
-    fn visit_struct_fields(visitor: &EngineSchemaVisitor, s: &StructType) -> usize {
+    fn visit_struct_fields(
+        visitor: &EngineSchemaVisitor,
+        s: &StructType,
+        primitive: Option<VisitPrimitiveFn>,
+    ) -> DeltaResult<usize> {
         let child_list_id = (visitor.make_field_list)(visitor.data, s.num_fields());
         for field in s.fields() {
             visit_schema_item(
@@ -287,16 +382,18 @@ fn visit_schema_impl(schema: &StructType, visitor: &mut EngineSchemaVisitor) -> 
                 &field.metadata().clone().into(),
                 visitor,
                 child_list_id,
-            );
+                primitive,
+            )?;
         }
-        child_list_id
+        Ok(child_list_id)
     }
 
     fn visit_array_item(
         visitor: &EngineSchemaVisitor,
         at: &ArrayType,
         contains_null: bool,
-    ) -> usize {
+        primitive: Option<VisitPrimitiveFn>,
+    ) -> DeltaResult<usize> {
         let child_list_id = (visitor.make_field_list)(visitor.data, 1);
         let metadata = CMetadataMap::default();
         visit_schema_item(
@@ -306,15 +403,17 @@ fn visit_schema_impl(schema: &StructType, visitor: &mut EngineSchemaVisitor) -> 
             &metadata,
             visitor,
             child_list_id,
-        );
-        child_list_id
+            primitive,
+        )?;
+        Ok(child_list_id)
     }
 
     fn visit_map_types(
         visitor: &EngineSchemaVisitor,
         mt: &MapType,
         value_contains_null: bool,
-    ) -> usize {
+        primitive: Option<VisitPrimitiveFn>,
+    ) -> DeltaResult<usize> {
         let child_list_id = (visitor.make_field_list)(visitor.data, 2);
         let metadata = CMetadataMap::default();
         visit_schema_item(
@@ -324,7 +423,8 @@ fn visit_schema_impl(schema: &StructType, visitor: &mut EngineSchemaVisitor) -> 
             &metadata,
             visitor,
             child_list_id,
-        );
+            primitive,
+        )?;
         visit_schema_item(
             "map_value",
             &mt.value_type,
@@ -332,8 +432,9 @@ fn visit_schema_impl(schema: &StructType, visitor: &mut EngineSchemaVisitor) -> 
             &metadata,
             visitor,
             child_list_id,
-        );
-        child_list_id
+            primitive,
+        )?;
+        Ok(child_list_id)
     }
 
     // Visit a struct field (recursively) and add the result to the list of siblings.
@@ -344,7 +445,8 @@ fn visit_schema_impl(schema: &StructType, visitor: &mut EngineSchemaVisitor) -> 
         metadata: &CMetadataMap,
         visitor: &EngineSchemaVisitor,
         sibling_list_id: usize,
-    ) {
+        primitive: Option<VisitPrimitiveFn>,
+    ) -> DeltaResult<()> {
         macro_rules! call {
             ( $visitor_fn:ident $(, $extra_args:expr) *) => {
                 (visitor.$visitor_fn)(
@@ -357,16 +459,22 @@ fn visit_schema_impl(schema: &StructType, visitor: &mut EngineSchemaVisitor) -> 
                 )
             };
         }
+        #[allow(unreachable_patterns)]
         match data_type {
-            DataType::Struct(st) => call!(visit_struct, visit_struct_fields(visitor, st)),
+            DataType::Struct(st) => {
+                call!(visit_struct, visit_struct_fields(visitor, st, primitive)?)
+            }
             DataType::Map(mt) => {
                 call!(
                     visit_map,
-                    visit_map_types(visitor, mt, mt.value_contains_null)
+                    visit_map_types(visitor, mt, mt.value_contains_null, primitive)?
                 )
             }
             DataType::Array(at) => {
-                call!(visit_array, visit_array_item(visitor, at, at.contains_null))
+                call!(
+                    visit_array,
+                    visit_array_item(visitor, at, at.contains_null, primitive)?
+                )
             }
             DataType::Primitive(PrimitiveType::Decimal(d)) => {
                 call!(visit_decimal, d.precision(), d.scale())
@@ -402,10 +510,25 @@ fn visit_schema_impl(schema: &StructType, visitor: &mut EngineSchemaVisitor) -> 
                     kernel_string_slice!(algorithm)
                 )
             }
+            DataType::Primitive(other) => {
+                let callback = primitive.ok_or_else(|| {
+                    Error::unsupported(format!("C schema visitor does not support {other}"))
+                })?;
+                let type_name = other.to_string();
+                callback(
+                    visitor.data,
+                    sibling_list_id,
+                    kernel_string_slice!(name),
+                    is_nullable,
+                    metadata,
+                    kernel_string_slice!(type_name),
+                );
+            }
         }
+        Ok(())
     }
 
-    visit_struct_fields(visitor, schema)
+    visit_struct_fields(visitor, schema, primitive)
 }
 
 #[cfg(test)]
@@ -642,6 +765,89 @@ mod tests {
         }
     }
 
+    #[rstest::rstest]
+    #[case("timestamp", false)]
+    #[case("timestamp_nanos", true)]
+    fn versioned_schema_preflights_nested_nanoseconds_without_legacy_callbacks(
+        #[case] primitive_type: &'static str,
+        #[case] unsupported_v1: bool,
+    ) {
+        if serde_json::from_value::<DataType>(serde_json::json!(primitive_type)).is_err() {
+            // Exercised in the mandatory dependency-feature-unification test lane.
+            return;
+        }
+        let schema: StructType = serde_json::from_value(serde_json::json!({
+            "type": "struct", "fields": [
+                {"name":"ordinary", "type":"long", "nullable":false, "metadata":{}},
+                {"name":"nested", "type":{"type":"array", "containsNull":false,
+                    "elementType":{"type":"map", "keyType":"string",
+                    "valueType":primitive_type, "valueContainsNull":true}},
+                    "nullable":true, "metadata":{}}
+            ]
+        }))
+        .unwrap();
+        let mut builder = TestSchemaBuilder::default();
+        let mut visitor = test_visitor(&mut builder);
+        let legacy = visit_schema_impl(&schema, &mut visitor, None);
+        if unsupported_v1 {
+            assert!(matches!(legacy, Err(delta_kernel::Error::Unsupported(_))));
+            assert!(builder.lists.is_empty());
+        } else {
+            assert_eq!(legacy.unwrap(), 0);
+        }
+        builder = TestSchemaBuilder::default();
+        let mut visitor = EngineSchemaVisitorV2 {
+            v1: test_visitor(&mut builder),
+            visit_primitive: visit_new_primitive,
+        };
+        let owned = std::sync::Arc::new(schema);
+        let handle: Handle<SharedSchemaV2> = owned.clone().into();
+        let top = crate::ffi_test_utils::ok_or_panic(unsafe {
+            visit_schema_v2(
+                handle.shallow_copy(),
+                &mut visitor,
+                crate::ffi_test_utils::allocate_err,
+            )
+        });
+        assert_eq!(std::sync::Arc::strong_count(&owned), 2);
+        unsafe { crate::free_schema_v2(handle) };
+        assert_eq!(std::sync::Arc::strong_count(&owned), 1);
+        assert_eq!(top, 0);
+        assert_eq!(
+            builder.lists[0][0],
+            VisitedField::new("ordinary", "long", false, None)
+        );
+        assert_eq!(
+            builder.lists[0][1],
+            VisitedField::new("nested", "array", true, Some(1))
+        );
+        assert_eq!(
+            builder.lists[1][0],
+            VisitedField::new("array_element", "map", false, Some(2))
+        );
+        assert_eq!(
+            builder.lists[2][0],
+            VisitedField::new("map_key", "string", false, None)
+        );
+        assert_eq!(
+            builder.lists[2][1],
+            VisitedField::new("map_value", primitive_type, true, None)
+        );
+    }
+
+    extern "C" fn visit_new_primitive(
+        data: *mut c_void,
+        list: usize,
+        name: KernelStringSlice,
+        nullable: bool,
+        _metadata: &CMetadataMap,
+        type_name: KernelStringSlice,
+    ) {
+        let type_name = unsafe { String::try_from_slice(&type_name) }.unwrap();
+        assert_eq!(type_name, "timestamp_nanos");
+        add_field(data, list, name, nullable, "timestamp_nanos", None);
+    }
+
     #[test]
     fn visit_schema_preserves_interval_fields() {
         let schema = schema! {
@@ -655,7 +861,7 @@ mod tests {
 
         let mut builder = TestSchemaBuilder::default();
         let mut visitor = test_visitor(&mut builder);
-        let top_level_id = visit_schema_impl(&schema, &mut visitor);
+        let top_level_id = visit_schema_impl(&schema, &mut visitor, None).unwrap();
 
         assert_eq!(top_level_id, 0);
         assert_eq!(builder.lists[0].len(), 4);
@@ -695,7 +901,7 @@ mod tests {
 
         let mut builder = TestSchemaBuilder::default();
         let mut visitor = test_visitor(&mut builder);
-        let top_level_id = visit_schema_impl(&schema, &mut visitor);
+        let top_level_id = visit_schema_impl(&schema, &mut visitor, None).unwrap();
 
         assert_eq!(top_level_id, 0);
         assert_eq!(builder.lists[0].len(), 2);
@@ -728,7 +934,7 @@ mod tests {
 
         let mut builder = TestSchemaBuilder::default();
         let mut visitor = test_visitor(&mut builder);
-        let top_level_id = visit_schema_impl(&schema, &mut visitor);
+        let top_level_id = visit_schema_impl(&schema, &mut visitor, None).unwrap();
 
         assert_eq!(top_level_id, 0);
         assert_eq!(builder.lists[0].len(), 1);

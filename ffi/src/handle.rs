@@ -84,6 +84,9 @@ mod private {
     /// * Not yet dropped by a call to [`Handle::drop_handle`]
     /// * Not yet consumed by a call to [`Handle::into_inner`]
     ///
+    /// * For legacy FFI objects fabricated by Rust callers, all reachable schemas and scalar values
+    ///   satisfy the crate-level [V1 schema compatibility contract](crate#schema-compatibility).
+    ///
     /// Additionally, in keeping with the [`Send`] contract, multi-threaded external code must
     /// enforce mutual exclusion -- no mutable handle should ever be passed to more than one kernel
     /// API call at a time. If thread races are possible, the handle should be protected with a

@@ -62,6 +62,7 @@ pub fn extract_kernel_schema(
             "Didn't consume all visited fields, schema is invalid.",
         ))
     } else {
+        crate::schema::validate_schema_v1(&struct_type)?;
         Ok(*struct_type)
     }
 }
@@ -613,6 +614,85 @@ mod tests {
                 ))
             }
         );
+    }
+
+    #[tokio::test]
+    async fn create_table_admission_checks_nanosecond_partition_schema_before_any_write() {
+        use std::sync::Arc;
+
+        use delta_kernel::object_store::memory::InMemory;
+        use delta_kernel::object_store::path::Path;
+        use delta_kernel::object_store::ObjectStoreExt;
+
+        use crate::ffi_test_utils::{engine_handle_for_store, recover_error};
+        extern "C" fn supply_schema(
+            schema: *mut std::ffi::c_void,
+            state: &mut KernelSchemaVisitorState,
+        ) -> usize {
+            let schema = unsafe { &*(schema as *const StructType) };
+            wrap_field(state, StructField::new("root", schema.clone(), false))
+        }
+        for name in ["timestamp", "timestamp_ntz", "timestamp_nanos"] {
+            let Ok(data_type) = serde_json::from_value::<DataType>(serde_json::json!(name)) else {
+                continue;
+            };
+            let mut schema = StructType::new_unchecked([
+                StructField::new("data", DataType::LONG, false),
+                StructField::new("partition", data_type, false),
+            ]);
+            let storage = Arc::new(InMemory::new());
+            let engine = engine_handle_for_store(storage.clone());
+            let schema = crate::scan::EngineSchema {
+                schema: &mut schema as *mut _ as *mut std::ffi::c_void,
+                visitor: supply_schema,
+            };
+            let result = unsafe {
+                crate::transaction::get_create_table_builder(
+                    crate::KernelStringSlice::new_unsafe("memory:///"),
+                    &schema,
+                    crate::KernelStringSlice::new_unsafe("ffi-v1-test"),
+                    engine.shallow_copy(),
+                )
+            };
+            match result {
+                ExternResult::Err(error) => {
+                    let error = unsafe { recover_error(error) };
+                    assert_eq!(name, "timestamp_nanos");
+                    assert_eq!(error.etype, KernelError::UnsupportedError);
+                    assert_eq!(
+                        error.message,
+                        "Unsupported: C schema visitor does not support timestamp_nanos"
+                    );
+                }
+                ExternResult::Ok(builder) => {
+                    assert_ne!(name, "timestamp_nanos");
+                    unsafe { crate::transaction::free_create_table_builder(builder) };
+                }
+            }
+            assert!(storage
+                .head(&Path::from("_delta_log/00000000000000000000.json"))
+                .await
+                .is_err());
+            unsafe { crate::free_engine(engine) };
+        }
+    }
+
+    #[test]
+    fn legacy_schema_extraction_rejects_nanosecond_partition_columns() {
+        let Ok(nano) = serde_json::from_str::<DataType>("\"timestamp_nanos\"") else {
+            // Exercised in the mandatory dependency-feature-unification test lane.
+            return;
+        };
+        let schema = StructType::new_unchecked([
+            StructField::new("data", DataType::LONG, false),
+            StructField::new("partition", nano, false),
+        ]);
+        let mut state = KernelSchemaVisitorState::default();
+        let root = wrap_field(&mut state, StructField::new("root", schema, false));
+        assert!(matches!(
+            extract_kernel_schema(&mut state, root),
+            Err(Error::Unsupported(_))
+        ));
     }
 
     macro_rules! visit_field {

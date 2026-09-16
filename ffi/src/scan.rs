@@ -16,6 +16,7 @@ use url::Url;
 use super::handle::Handle;
 #[cfg(feature = "default-engine-base")]
 use crate::engine_data::ArrowFFIData;
+use crate::expressions::engine_visitor::validate_expression_v1;
 use crate::expressions::kernel_visitor::{unwrap_kernel_predicate, KernelExpressionVisitorState};
 use crate::expressions::SharedExpression;
 use crate::schema_visitor::{extract_kernel_schema, KernelSchemaVisitorState};
@@ -204,12 +205,14 @@ pub(crate) fn decode_engine_predicate(
 ) -> DeltaResult<delta_kernel::Predicate> {
     let mut visitor_state = KernelExpressionVisitorState::default();
     let pred_id = (predicate.visitor)(predicate.predicate, &mut visitor_state);
-    unwrap_kernel_predicate(&mut visitor_state, pred_id).ok_or_else(|| {
+    let predicate = unwrap_kernel_predicate(&mut visitor_state, pred_id).ok_or_else(|| {
         delta_kernel::Error::generic(
             "engine predicate visitor returned an invalid expression ID; \
              predicate could not be decoded",
         )
-    })
+    })?;
+    crate::expressions::engine_visitor::validate_predicate_v1(&predicate)?;
+    Ok(predicate)
 }
 
 /// Decode an [`EnginePredicate`] and apply it to a [`ScanBuilder`].
@@ -241,6 +244,7 @@ fn scan_impl(
     predicate: Option<&mut EnginePredicate>,
     schema: Option<&EngineSchema>,
 ) -> DeltaResult<Handle<SharedScan>> {
+    crate::schema::validate_schema_v1(&snapshot.schema())?;
     let mut scan_builder = snapshot.scan_builder();
     if let Some(predicate) = predicate {
         scan_builder = apply_predicate(scan_builder, predicate)?;
@@ -248,7 +252,13 @@ fn scan_impl(
     if let Some(schema) = schema {
         scan_builder = apply_schema(scan_builder, schema)?;
     }
-    Ok(Arc::new(scan_builder.build()?).into())
+    legacy_scan_handle(scan_builder.build()?)
+}
+
+fn legacy_scan_handle(scan: Scan) -> DeltaResult<Handle<SharedScan>> {
+    crate::schema::validate_schema_v1(scan.logical_schema())?;
+    crate::schema::validate_schema_v1(scan.physical_schema())?;
+    Ok(Arc::new(scan).into())
 }
 
 /// Create a [`ScanBuilder`] for the given snapshot.
@@ -380,7 +390,7 @@ pub unsafe extern "C" fn scan_builder_build(
     let builder = unsafe { builder.into_inner() };
     builder
         .build()
-        .map(|scan| Arc::new(scan).into())
+        .and_then(legacy_scan_handle)
         .into_extern_result(&engine)
 }
 
@@ -574,6 +584,7 @@ fn scan_metadata_next_impl(
 ) -> DeltaResult<bool> {
     let mut data = data.lock_iter()?;
     if let Some(scan_metadata) = data.next().transpose()? {
+        validate_scan_metadata_v1(&scan_metadata)?;
         (engine_visitor)(engine_context, Arc::new(scan_metadata).into());
         Ok(true)
     } else {
@@ -961,12 +972,20 @@ fn visit_scan_metadata_impl(
     engine_context: NullableCvoid,
     callback: CScanCallback,
 ) -> DeltaResult<bool> {
+    validate_scan_metadata_v1(scan_metadata)?;
     let context_wrapper = ContextWrapper {
         engine_context,
         callback,
     };
     scan_metadata.visit_scan_files(context_wrapper, rust_callback)?;
     Ok(true)
+}
+
+fn validate_scan_metadata_v1(scan_metadata: &ScanMetadata) -> DeltaResult<()> {
+    for transform in scan_metadata.scan_file_transforms.iter().flatten() {
+        validate_expression_v1(transform)?;
+    }
+    Ok(())
 }
 
 // === Arrow batch-mode scan metadata ===
@@ -1030,6 +1049,7 @@ fn scan_metadata_next_arrow_impl(
 
     match iter.next().transpose()? {
         Some(scan_metadata) => {
+            validate_scan_metadata_v1(&scan_metadata)?;
             let (engine_data, selection_vector) = scan_metadata.scan_files.into_parts();
             let arrow_data = ArrowFFIData::try_from_engine_data(engine_data)?;
             let result = Box::new(ScanMetadataArrowResult {
@@ -1422,6 +1442,80 @@ mod scan_metadata_arrow_tests {
             .collect::<Vec<_>>();
         assert_eq!(selected_rows.len(), 1);
         selected_rows[0]
+    }
+
+    #[rstest]
+    #[case(0)]
+    #[case(1)]
+    #[case(2)]
+    #[tokio::test]
+    async fn nanosecond_scan_transforms_fail_before_legacy_outputs(#[case] path: u8) {
+        use delta_kernel::expressions::Scalar;
+
+        use super::*;
+
+        let Ok(nano) =
+            serde_json::from_str::<delta_kernel::schema::DataType>("\"timestamp_nanos\"")
+        else {
+            return;
+        };
+        extern "C" fn metadata_callback(context: NullableCvoid, data: Handle<SharedScanMetadata>) {
+            unsafe {
+                *context.unwrap().as_ptr().cast::<usize>() += 1;
+                data.drop_handle();
+            }
+        }
+        extern "C" fn row_callback(
+            context: NullableCvoid,
+            _: KernelStringSlice,
+            _: i64,
+            _: i64,
+            _: Option<&Stats>,
+            _: &CDvInfo,
+            _: Option<&Expression>,
+            _: &CStringMap,
+        ) {
+            unsafe { *context.unwrap().as_ptr().cast::<usize>() += 1 };
+        }
+        let (engine, snapshot, scan, iter) = setup_scan_iter(vec![
+            TestAction::Metadata,
+            TestAction::Add("file1.parquet".into()),
+            TestAction::Add("file2.parquet".into()),
+        ])
+        .await;
+        let iter_ref = unsafe { iter.as_ref() };
+        let mut metadata = iter_ref.lock_iter().unwrap().next().unwrap().unwrap();
+        metadata.scan_file_transforms = vec![
+            Some(Arc::new(Expression::literal(1))),
+            Some(Arc::new(Expression::literal(Scalar::Null(nano)))),
+        ];
+        let mut callbacks = 0usize;
+        let context = Some(std::ptr::NonNull::from(&mut callbacks).cast());
+        let result = match path {
+            0 => visit_scan_metadata_impl(&metadata, context, row_callback),
+            _ => {
+                let data = ScanMetadataIterator {
+                    data: Mutex::new(Box::new(std::iter::once(Ok(metadata)))),
+                    engine: iter_ref.engine.clone(),
+                };
+                if path == 1 {
+                    scan_metadata_next_impl(&data, context, metadata_callback)
+                } else {
+                    scan_metadata_next_arrow_impl(&data).map(|result| {
+                        unsafe { free_scan_metadata_arrow_result(result) };
+                        true
+                    })
+                }
+            }
+        };
+        assert!(matches!(result, Err(delta_kernel::Error::Unsupported(_))));
+        assert_eq!(callbacks, 0);
+        unsafe {
+            free_scan_metadata_iter(iter);
+            free_scan(scan);
+            free_snapshot(snapshot);
+            free_engine(engine);
+        }
     }
 
     #[tokio::test]

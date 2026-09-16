@@ -422,3 +422,9 @@ stale data flows, or wrong file paths in these docs,
 inform the user so they can be updated. After major changes, update this file,
 `CLAUDE/architecture.md`, `ffi/CLAUDE.md`, `.github/CLAUDE.md`, and any relevant
 `<crate>/CLAUDE.md` files.
+
+## FFI schema versions
+
+Legacy FFI admissions enforce recursive V1 schema/scalar compatibility; Rust-fabricated legacy
+handles and raw-reference visitors must preserve the same safety precondition. Additive V2 visitors
+preflight inputs and use distinct schema handles for nanosecond ParseJSON schemas. See `ffi/CLAUDE.md`.

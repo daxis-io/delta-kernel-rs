@@ -41,7 +41,7 @@ pub unsafe extern "C" fn get_unpartitioned_write_context(
     let engine = unsafe { engine.as_ref() };
     txn.write_state()
         .and_then(|state| state.unpartitioned_write_context())
-        .map(|context| Arc::new(context).into())
+        .and_then(legacy_write_context_handle)
         .into_extern_result(&engine)
 }
 
@@ -62,7 +62,7 @@ pub unsafe extern "C" fn create_table_get_unpartitioned_write_context(
     let engine = unsafe { engine.as_ref() };
     txn.write_state()
         .and_then(|state| state.unpartitioned_write_context())
-        .map(|context| Arc::new(context).into())
+        .and_then(legacy_write_context_handle)
         .into_extern_result(&engine)
 }
 
@@ -127,6 +127,15 @@ fn partitioned_write_context_impl(
     partition_values: PartitionValueMap,
 ) -> DeltaResult<Handle<SharedWriteContext>> {
     let context = build(partition_values.inner)?;
+    legacy_write_context_handle(context)
+}
+
+fn legacy_write_context_handle(
+    context: BoundWriteContext,
+) -> DeltaResult<Handle<SharedWriteContext>> {
+    crate::schema::validate_schema_v1(context.logical_schema())?;
+    crate::schema::validate_schema_v1(context.physical_schema())?;
+    crate::expressions::engine_visitor::validate_expression_v1(&context.logical_to_physical())?;
     Ok(Arc::new(context).into())
 }
 
