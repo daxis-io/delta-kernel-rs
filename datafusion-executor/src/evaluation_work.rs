@@ -1,7 +1,8 @@
 //! Prepaid semantic element/byte work for the sealed DataFusion path.
 //! These counts describe selected source walks, not allocator instructions.
-use crate::closed_plan_facts::ClosedPlanFacts;
 use delta_kernel::tasks::{OperationFailure, Resource, ResourceExhausted, TaskLimits};
+
+use crate::closed_plan_facts::ClosedPlanFacts;
 
 fn checked(value: Option<usize>, limits: TaskLimits) -> Result<usize, OperationFailure> {
     value.ok_or_else(|| {

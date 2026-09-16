@@ -969,8 +969,6 @@ mod test {
     use crate::schema::{
         column_name, schema, schema_ref, ColumnName, DataType, SchemaRef, StructField,
     };
-    #[cfg(feature = "nanosecond-timestamps")]
-    use crate::table_features::validate_timestamp_nanos_feature_support;
     use crate::table_features::{
         ColumnMappingMode, FeatureType, Operation, TableFeature, TABLE_FEATURES_MIN_READER_VERSION,
         TABLE_FEATURES_MIN_WRITER_VERSION,

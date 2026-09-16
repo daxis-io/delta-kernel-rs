@@ -1,10 +1,11 @@
 //! Compiler frame layouts and selected futures-util0.3.32 queue owners.
 //! This component excludes physical operators, decoder buffers and host state.
 
+use std::alloc::Layout;
+
 use datafusion::physical_planner::DefaultPhysicalPlanner;
 use datafusion_datasource_json::source::JsonSource;
 use delta_kernel::tasks::{OperationFailure, Resource, ResourceExhausted, TaskLimits};
-use std::alloc::Layout;
 
 /// Bound a Rust aggregate of known fields regardless of field reordering. Each
 /// field contributes its size rounded to the aggregate alignment; that covers
@@ -136,10 +137,12 @@ pub(crate) fn peak(limits: TaskLimits) -> Result<usize, OperationFailure> {
 
 #[cfg(test)]
 mod tests {
+    use std::mem::size_of;
+
+    use delta_kernel::tasks::FailureKind;
+
     use super::*;
     use crate::json_arrays::tests::observe_allocations;
-    use delta_kernel::tasks::FailureKind;
-    use std::mem::size_of;
 
     #[test]
     fn actual_frame_layout_admission_allocates_nothing() {

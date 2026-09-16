@@ -1,5 +1,8 @@
 //! Transfer of source-admitted full array backing into Kernel evaluation pages.
 
+use std::mem::size_of;
+use std::sync::Arc;
+
 use datafusion::arrow::array::{RecordBatch, StructArray};
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::execution::memory_pool::MemoryReservation;
@@ -11,8 +14,6 @@ use delta_kernel::tasks::{
     AccountedEngineData, OperationFailure, Resource, ResourceExhausted, TaskLimits,
 };
 use delta_kernel::{DeltaResult, EngineData};
-use std::mem::size_of;
-use std::sync::Arc;
 
 /// A bound established before a stream pull, independent of visible batch size.
 /// `backing_rows` bounds the materialized aggregate's full backing, not its slice.
@@ -191,11 +192,12 @@ impl EngineData for LeasedData {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::json_arrays::tests::observe_allocations;
     use datafusion::arrow::array::Int64Array;
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryConsumer, MemoryPool};
+
+    use super::*;
+    use crate::json_arrays::tests::observe_allocations;
     #[test]
     fn page_preflight_and_last_owner_reservation_lifetime() {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));

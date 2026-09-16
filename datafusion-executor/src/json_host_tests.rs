@@ -1,15 +1,16 @@
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+
+use datafusion::execution::config::SessionConfig;
+use datafusion::execution::context::SessionContext;
+use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
+use datafusion::execution::object_store::ObjectStoreUrl;
+use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+use datafusion::execution::session_state::SessionStateBuilder;
+use delta_kernel::tasks::*;
+
 use crate::qualification_fixture::{FixtureStore, LogVariant};
 use crate::JsonTaskHost;
-use datafusion::execution::{
-    config::SessionConfig,
-    context::SessionContext,
-    memory_pool::{GreedyMemoryPool, MemoryPool},
-    object_store::ObjectStoreUrl,
-    runtime_env::RuntimeEnvBuilder,
-    session_state::SessionStateBuilder,
-};
-use delta_kernel::tasks::*;
-use std::sync::{atomic::Ordering, Arc};
 
 fn caller(store: Arc<FixtureStore>) -> (SessionContext, Arc<GreedyMemoryPool>) {
     let pool = Arc::new(GreedyMemoryPool::new(64 << 20));

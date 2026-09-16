@@ -3,7 +3,7 @@ name: run-examples
 # Restrict push to long-lived branches to avoid duplicate CI runs. See .github/CLAUDE.md.
 on:
   push:
-    branches: [main, "release/**"]
+    branches: [main, "axon/native-stack", "release/**"]
   pull_request:
   merge_group:
 

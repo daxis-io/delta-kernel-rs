@@ -34,14 +34,16 @@ pub(crate) fn grouping_owner_peak(
     bytes: usize,
     limits: delta_kernel::tasks::TaskLimits,
 ) -> Result<usize, delta_kernel::tasks::OperationFailure> {
-    use crate::json_arrays::vec_peak;
+    use std::mem::size_of;
+
     use datafusion::arrow::array::{ArrayRef, StructArray};
     use datafusion::arrow::buffer::ScalarBuffer;
     use datafusion::arrow::datatypes::{DataType, Field, FieldRef};
     use datafusion::arrow::row::{OwnedRow, Row, RowConverter, Rows, SortField};
     use datafusion::physical_plan::aggregates::group_values::GroupValuesRows;
     use delta_kernel::tasks::{OperationFailure, Resource, ResourceExhausted};
-    use std::mem::size_of;
+
+    use crate::json_arrays::vec_peak;
 
     // Only Kernel's concrete file_action_key, never a caller-selected group key.
     let malformed = || OperationFailure::malformed_response();
@@ -204,11 +206,13 @@ pub(crate) fn grouping_owner_peak(
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
-    use super::*;
+    use std::sync::Arc;
+
     use datafusion::arrow::array::{Array, ArrayRef, Int32Array, StringArray, StructArray};
     use datafusion::arrow::datatypes::{DataType, Field};
     use datafusion::arrow::row::{RowConverter, SortField};
-    use std::sync::Arc;
+
+    use super::*;
 
     #[test]
     fn key_bound_covers_arrow_block_boundaries_and_null_dv() {

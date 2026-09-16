@@ -821,10 +821,11 @@ impl AdmittedPlan {
 
 #[cfg(test)]
 pub(super) mod json_tests {
+    use prost::Message;
+
     use super::*;
     use crate::schema::DataType;
     use crate::tasks::{FileDescriptor, LogIdentityManifest, ObjectIdentity};
-    use prost::Message;
 
     pub(crate) fn snapshot(schema: StructType) -> crate::snapshot::SnapshotRef {
         let limits = TaskLimits::qualification();

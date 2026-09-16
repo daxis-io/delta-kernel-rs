@@ -732,6 +732,10 @@ mod tests {
     async fn read_all_rows_helper(file_meta: FileMeta) -> DeltaResult<Vec<RecordBatch>> {
         let store = Arc::new(LocalFileSystem::new());
         let path = Path::from_url_path(file_meta.location.path()).unwrap();
+        #[allow(
+            deprecated,
+            reason = "preserve exact range and batched reads on the pinned native reader"
+        )]
         let reader = ParquetObjectReader::new(store.clone(), path);
         let physical_schema = ParquetRecordBatchStreamBuilder::new(reader)
             .await
@@ -800,6 +804,10 @@ mod tests {
         // Baseline: how many `get_opts` calls a single footer load makes (one or more range GETs,
         // depending on parquet version). The reader builder must not exceed this.
         let baseline_store = Arc::new(GetOptsCountingStore::new(LocalFileSystem::new()));
+        #[allow(
+            deprecated,
+            reason = "preserve exact range and batched reads on the pinned native reader"
+        )]
         let mut reader =
             ParquetObjectReader::new(baseline_store.clone(), location).with_file_size(file_size);
         let metadata = ArrowReaderMetadata::load_async(&mut reader, reader_options())
@@ -850,6 +858,10 @@ mod tests {
         let location = Path::from_url_path(url.path()).unwrap();
         let meta = store.head(&location).await.unwrap();
 
+        #[allow(
+            deprecated,
+            reason = "preserve exact range and batched reads on the pinned native reader"
+        )]
         let reader = ParquetObjectReader::new(store.clone(), location);
         let physical_schema = ParquetRecordBatchStreamBuilder::new(reader)
             .await
@@ -1121,6 +1133,10 @@ mod tests {
 
         // check we can read back
         let path = Path::from_url_path(location.path()).unwrap();
+        #[allow(
+            deprecated,
+            reason = "preserve exact range and batched reads on the pinned native reader"
+        )]
         let reader = ParquetObjectReader::new(store.clone(), path);
         let physical_schema = ParquetRecordBatchStreamBuilder::new(reader)
             .await
@@ -1206,6 +1222,10 @@ mod tests {
         // Verify we can read the file back
         let path = Path::from_url_path(file_url.path()).unwrap();
         let metadata = store.head(&path).await.unwrap();
+        #[allow(
+            deprecated,
+            reason = "preserve exact range and batched reads on the pinned native reader"
+        )]
         let reader = ParquetObjectReader::new(store.clone(), path);
         let physical_schema = ParquetRecordBatchStreamBuilder::new(reader)
             .await
@@ -1257,6 +1277,10 @@ mod tests {
 
         let path = Path::from_url_path(file_url.path()).unwrap();
         let metadata = store.head(&path).await.unwrap();
+        #[allow(
+            deprecated,
+            reason = "preserve exact range and batched reads on the pinned native reader"
+        )]
         let reader = ParquetObjectReader::new(store.clone(), path);
         let physical_schema = ParquetRecordBatchStreamBuilder::new(reader)
             .await
@@ -1408,6 +1432,10 @@ mod tests {
         // Read it back
         let path = Path::from_url_path(file_url.path()).unwrap();
         let metadata = store.head(&path).await.unwrap();
+        #[allow(
+            deprecated,
+            reason = "preserve exact range and batched reads on the pinned native reader"
+        )]
         let reader = ParquetObjectReader::new(store.clone(), path);
         let physical_schema = ParquetRecordBatchStreamBuilder::new(reader)
             .await
@@ -1753,6 +1781,10 @@ mod tests {
             .unwrap();
 
         let path = Path::from_url_path(metadata.file_meta.location.path()).unwrap();
+        #[allow(
+            deprecated,
+            reason = "preserve exact range and batched reads on the pinned native reader"
+        )]
         let reader = ParquetObjectReader::new(store, path);
         let builder = ParquetRecordBatchStreamBuilder::new(reader).await.unwrap();
         let kv = builder.metadata().file_metadata().key_value_metadata();
@@ -1798,6 +1830,10 @@ mod tests {
         assert!(nested_path.exists());
 
         let path = Path::from_url_path(file_url.path()).unwrap();
+        #[allow(
+            deprecated,
+            reason = "preserve exact range and batched reads on the pinned native reader"
+        )]
         let reader = ParquetObjectReader::new(store.clone(), path);
         let batches: Vec<RecordBatch> = ParquetRecordBatchStreamBuilder::new(reader)
             .await

@@ -616,8 +616,6 @@ mod tests {
 
     use super::{extract_record_batch, ArrowEngineData};
     use crate::actions::{get_commit_schema, Metadata, Protocol, LOG_PROTOCOL_SCHEMA};
-    #[cfg(feature = "nanosecond-timestamps")]
-    use crate::arrow::array::types::TimestampNanosecondType;
     use crate::arrow::array::types::{Int32Type, Int64Type};
     use crate::arrow::array::{
         Array, ArrayRef, AsArray, BinaryArray, BooleanArray, Int32Array, Int64Array,

@@ -1,3 +1,5 @@
+use std::mem::size_of;
+
 use super::json_materialization::{check, engine, exhausted};
 use super::json_snapshot::task_evaluation_limits;
 use super::plan_admission::JsonPlanBudget;
@@ -8,7 +10,6 @@ use crate::scan::ScanMetadata;
 use crate::schema::{ColumnName, DataType};
 use crate::snapshot::SnapshotRef;
 use crate::{EngineData, FilteredEngineData};
-use std::mem::size_of;
 
 /// One independently identified evaluation of Kernel's JSON-only live-add plan. Output is a
 /// finite, admitted collection in the existing scan-row representation. No execution stream,
@@ -504,14 +505,13 @@ impl TaskState for ScanState {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
     use super::*;
     use crate::schema::{DataType, StructField, StructType};
     use crate::tasks::json_snapshot::tests::Batch;
     use crate::tasks::plan_admission::json_tests::snapshot;
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    };
 
     #[test]
     fn json_task_scan_producer_work_survives_cancel_before_start() {

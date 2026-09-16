@@ -11,7 +11,7 @@ The CI trigger events:
 - `merge_group`: the merge queue builds a temporary `gh-readonly-queue/*` branch
   and tests the change as it would land on `main`.
 - `push`: a branch ref is updated. We only want this for the long-lived branches
-  (`main` and `release/**`), i.e. the post-merge run once a PR lands.
+  (`main`, `axon/native-stack` and `release/**`), i.e. the post-merge run once a PR lands.
 
 We want CI on `pull_request`, on `merge_group`, and on `push` to a long-lived
 branch: one run per stage. A bare `push` trigger instead duplicates two of these:
@@ -28,7 +28,7 @@ case:
 ```yaml
 on:
   push:
-    branches: [main, "release/**"]
+    branches: [main, "axon/native-stack", "release/**"]
   pull_request:
   merge_group:
 ```

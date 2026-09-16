@@ -1,5 +1,6 @@
 use std::mem::size_of;
 use std::sync::Arc;
+
 use url::Url;
 
 use super::json_materialization::{check, engine, exhausted, preflight_pm};
@@ -39,10 +40,11 @@ impl SnapshotLoadTask {
         {
             return Err(OperationFailure::malformed_response());
         }
-        #[cfg(feature = "adaptive-metadata-in-dev")]
-        return Err(engine(crate::Error::unsupported(
-            "adaptive metadata is outside JSON operation tasks",
-        )));
+        if cfg!(feature = "adaptive-metadata-in-dev") {
+            return Err(engine(crate::Error::unsupported(
+                "adaptive metadata is outside JSON operation tasks",
+            )));
+        }
         let slots = limits.limit(Resource::LogDescriptors);
         if version.is_some_and(|v| v >= slots as u64 || v > i64::MAX as u64) {
             return Err(exhausted(Resource::LogDescriptors, &limits));
@@ -690,11 +692,12 @@ pub(super) fn task_evaluation_limits(
 }
 #[cfg(test)]
 pub(super) mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use crate::engine_data::{GetData, RowVisitor};
     use crate::expressions::{ArrayData, ColumnName};
     use crate::schema::SchemaRef;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     pub(crate) struct Batch {
         pub schema: String,
@@ -755,6 +758,27 @@ pub(super) mod tests {
             Ok(self.bytes)
         }
     }
+    #[test]
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    fn adaptive_metadata_build_rejects_json_snapshot_task() {
+        let id = TaskId::allocate().unwrap();
+        let evaluation = EvaluationKey::allocate(id.get()).unwrap();
+        let failure = SnapshotLoadTask::try_new(
+            id,
+            evaluation,
+            &Url::parse("memory:///table/").unwrap(),
+            None,
+            TaskLimits::qualification(),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(failure.kind(), FailureKind::Engine);
+        assert!(failure
+            .into_error()
+            .to_string()
+            .contains("adaptive metadata is outside JSON operation tasks"));
+    }
+
     fn state(limits: TaskLimits, evaluation: EvaluationKey) -> SnapshotState {
         SnapshotState {
             table_root: Url::parse("memory:///table/").unwrap(),
@@ -793,6 +817,7 @@ pub(super) mod tests {
         );
     }
     #[test]
+    #[cfg(not(feature = "adaptive-metadata-in-dev"))]
     fn listing_path_validation_is_prepaid_at_exact_and_one_less_work() {
         let path = "memory:///table/_delta_log/00000000000000000000.json";
         let required = 1 + 1 + 2 * path.len(); // capacity fold, validation visit, two comparisons
@@ -1011,6 +1036,7 @@ pub(super) mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "adaptive-metadata-in-dev"))]
     fn json_task_root_owners_cover_canonical_join_and_boundary() {
         for input in [
             "memory:///table",
@@ -1066,6 +1092,7 @@ pub(super) mod tests {
         assert_eq!(root_owner_peak(usize::MAX), None);
     }
     #[test]
+    #[cfg(not(feature = "adaptive-metadata-in-dev"))]
     fn json_task_plan_and_constructor_exhaustion_preserve_category_and_cleanup() {
         let id = TaskId::allocate().unwrap();
         let evaluation = EvaluationKey::allocate(id.get()).unwrap();

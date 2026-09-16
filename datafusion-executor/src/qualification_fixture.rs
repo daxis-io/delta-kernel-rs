@@ -1,18 +1,21 @@
 //! Frozen finite fixture shared by native and browser qualification.
 //! Caller-owned fixture state is constructed before opening a task. Every
 //! provider response and future is admitted before its allocation.
-use crate::log_storage::{AdmittedJsonLogStorage, JsonLogReadLimits, LogStorageFuture};
-use async_trait::async_trait;
-use delta_kernel::tasks::*;
-use futures::stream::BoxStream;
-use object_store::{
-    path::Path, CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta,
-    ObjectStore, PutMultipartOptions, PutOptions, PutPayload, PutResult,
-};
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
+
+use async_trait::async_trait;
+use delta_kernel::tasks::*;
+use futures::stream::BoxStream;
+use object_store::path::Path;
+use object_store::{
+    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
+    PutMultipartOptions, PutOptions, PutPayload, PutResult,
+};
+
+use crate::log_storage::{AdmittedJsonLogStorage, JsonLogReadLimits, LogStorageFuture};
 
 pub const ROOT: &str = "memory:///table/_delta_log/";
 pub const V0: &[u8] = include_bytes!("../tests/data/phase_d/00000000000000000000.json");

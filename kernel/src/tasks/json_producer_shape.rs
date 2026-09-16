@@ -86,13 +86,14 @@ const SCHEMA_SITES: &[&str] = &[
 /// Schema construction, sparse patch lowering and ordinary PlanBuilder remain
 /// unchanged. This sums source allocation sites, not measured heap peaks.
 pub(super) fn fixed_owner_peak() -> Option<usize> {
+    use std::mem::size_of;
+
     use super::json_schema_shape::{hash_peak, vector_peak};
     use crate::expressions::{ColumnName, Expression, ExpressionRef, Predicate};
     use crate::plans::ir::nodes::Agg;
     use crate::plans::ir::plan::PlanNode;
     use crate::schema::{ArrayType, MapType, SchemaRef, StructField, StructType};
     use crate::struct_patch::{ExpressionFieldPatch, ProjectionStructPatchBuilder};
-    use std::mem::size_of;
     let word = size_of::<usize>();
     #[repr(C)]
     struct SharedOwner<T> {

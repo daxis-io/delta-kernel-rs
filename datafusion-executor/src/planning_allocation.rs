@@ -3,8 +3,9 @@
 //! Counts come from borrowed Kernel IR, never from an allocated logical/physical
 //! plan. CASE reconstruction is bounded by its producer depth, including the
 //! second reconstruction in ProjectionMapping. Runtime buffers are separate.
-use crate::closed_plan_facts::ClosedPlanFacts;
-use crate::json_arrays::vec_peak;
+use std::mem::size_of;
+use std::sync::Arc;
+
 use datafusion::arrow::datatypes::{Field, FieldRef};
 use datafusion::common::{ColumnStatistics, ScalarValue, Statistics};
 use datafusion::logical_expr::{Expr, LogicalPlan};
@@ -16,8 +17,9 @@ use datafusion::physical_expr::{PhysicalExpr, ScalarFunctionExpr};
 use datafusion::physical_plan::{ExecutionPlan, PlanProperties};
 use datafusion::physical_planner::DefaultPhysicalPlanner;
 use delta_kernel::tasks::{OperationFailure, Resource, ResourceExhausted, TaskLimits};
-use std::mem::size_of;
-use std::sync::Arc;
+
+use crate::closed_plan_facts::ClosedPlanFacts;
+use crate::json_arrays::vec_peak;
 
 type Physical = Arc<dyn PhysicalExpr>;
 // ArcInner<T> is repr(C): two atomic usize counts followed by T. A

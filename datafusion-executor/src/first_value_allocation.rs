@@ -2,18 +2,18 @@
 //! Keys, operator/plan headers, evaluated arguments, and retained execution
 //! pages are separate owners; this component must be charged for BOTH stages.
 
-use crate::json_arrays::{copy_type_owner_peak, vec_peak};
-use datafusion::arrow::{
-    array::{ArrayRef, BooleanArray, BooleanBufferBuilder, Int64Array},
-    buffer::{NullBuffer, ScalarBuffer},
-    compute::{SortColumn, SortOptions},
-    datatypes::{DataType, Schema},
-};
+use std::alloc::Layout;
+use std::mem::size_of;
+
+use datafusion::arrow::array::{ArrayRef, BooleanArray, BooleanBufferBuilder, Int64Array};
+use datafusion::arrow::buffer::{NullBuffer, ScalarBuffer};
+use datafusion::arrow::compute::{SortColumn, SortOptions};
+use datafusion::arrow::datatypes::{DataType, Schema};
 use datafusion::common::ScalarValue;
 use datafusion::physical_expr_common::sort_expr::{LexOrdering, PhysicalSortExpr};
 use delta_kernel::tasks::{OperationFailure, Resource, ResourceExhausted, TaskLimits};
-use std::alloc::Layout;
-use std::mem::size_of;
+
+use crate::json_arrays::{copy_type_owner_peak, vec_peak};
 
 /// One ordered aggregate's state, bounded by all source rows/bytes, including
 /// grouped and global implementations. `schema` contains its value subtree;
@@ -142,10 +142,11 @@ pub(crate) fn state_type_peak(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::json_arrays::tests::observe_allocations;
     use datafusion::arrow::datatypes::Field;
     use delta_kernel::tasks::FailureKind;
+
+    use super::*;
+    use crate::json_arrays::tests::observe_allocations;
     #[test]
     fn value_state_bounds_are_checked_before_allocating() {
         let schema = Schema::new(vec![Field::new("value", DataType::Utf8, true)]);

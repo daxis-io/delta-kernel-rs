@@ -204,6 +204,7 @@ impl<'a> MapItem<'a> {
 
     /// Borrow every stored entry, including duplicate keys and null values, so
     /// task admission can count the same source slots as `materialize`.
+    #[cfg(feature = "operation-tasks")]
     pub(crate) fn entries(&self) -> impl Iterator<Item = (&'a str, Option<&'a str>)> + 'a {
         let keys = self.keys;
         let values = self.values;
@@ -215,6 +216,7 @@ impl<'a> MapItem<'a> {
         })
     }
 
+    #[cfg(feature = "operation-tasks")]
     pub(crate) fn entry_count(&self) -> usize {
         self.offsets.len()
     }

@@ -1,18 +1,19 @@
 //! Reached execution metrics, context and registration owners for closed JSON plans.
 //! Plan expressions, file queues, schemas and retained batches are separate components.
 
-use crate::evaluation_frames::aggregate;
-use crate::json_arrays::vec_peak;
-use chrono::{DateTime, Utc};
-use datafusion::execution::{
-    memory_pool::{MemoryConsumer, MemoryPool},
-    TaskContext,
-};
-use datafusion::physical_plan::metrics::{Metric, MetricsSet};
-use delta_kernel::tasks::{OperationFailure, Resource, ResourceExhausted, TaskLimits};
 use std::alloc::Layout;
 use std::mem::size_of;
-use std::sync::{atomic::AtomicUsize, Arc};
+use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
+
+use chrono::{DateTime, Utc};
+use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool};
+use datafusion::execution::TaskContext;
+use datafusion::physical_plan::metrics::{Metric, MetricsSet};
+use delta_kernel::tasks::{OperationFailure, Resource, ResourceExhausted, TaskLimits};
+
+use crate::evaluation_frames::aggregate;
+use crate::json_arrays::vec_peak;
 
 /// Backing of the host's MemoryReservation registration, retained by pages.
 pub(crate) fn host_registration_peak() -> Option<usize> {

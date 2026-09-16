@@ -1,10 +1,11 @@
 //! CASE buffer owners reached by the typed closed metadata expressions.
 //! Function argument/return-field and physical-plan owners are separate.
 
-use crate::closed_plan_facts::ClosedPlanFacts;
-use crate::json_arrays::{merge_type_owner_peak, output_type_owner_peak};
 use datafusion::arrow::datatypes::DataType;
 use delta_kernel::tasks::{OperationFailure, Resource, ResourceExhausted, TaskLimits};
+
+use crate::closed_plan_facts::ClosedPlanFacts;
+use crate::json_arrays::{merge_type_owner_peak, output_type_owner_peak};
 
 pub(crate) fn peak(
     facts: &ClosedPlanFacts,

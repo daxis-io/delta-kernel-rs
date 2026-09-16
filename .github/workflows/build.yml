@@ -3,7 +3,7 @@ name: build
 # Restrict push to long-lived branches to avoid duplicate CI runs. See .github/CLAUDE.md.
 on:
   push:
-    branches: [main, "release/**"]
+    branches: [main, "axon/native-stack", "release/**"]
   pull_request:
   merge_group:
 
@@ -193,6 +193,8 @@ jobs:
         run: cargo check-no-default-engine
       - name: lint without default features - packages which don't depend on kernel with features enabled
         run: cargo clippy-no-default-kernel-leaves
+      - name: test JSON operation tasks without adaptive metadata
+        run: cargo test --locked -p delta_kernel --features operation-tasks,vendored-protoc --lib tasks::json_snapshot::tests
       - name: check kernel declarative-plans feature-only build
         run: cargo check --locked -p delta_kernel --no-default-features --features declarative-plans,vendored-protoc
       - name: lint kernel declarative-plans feature-only build

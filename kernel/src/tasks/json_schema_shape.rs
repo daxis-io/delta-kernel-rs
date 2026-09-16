@@ -5,13 +5,14 @@
 //! enter their recursive allocation paths. Unknown schema properties retain serde's ignored-value
 //! behavior. Kernel's existing deserializer still owns required-field and schema semantics.
 
-use super::json_materialization::{check, engine, exhausted, preflight_schema_json};
-use super::{OperationFailure, Resource, TaskLimits};
-use serde::de::Error as _;
-use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
-use serde::Deserializer;
 use std::fmt;
 use std::mem::size_of;
+
+use serde::de::{self, DeserializeSeed, Error as _, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::Deserializer;
+
+use super::json_materialization::{check, engine, exhausted, preflight_schema_json};
+use super::{OperationFailure, Resource, TaskLimits};
 
 #[derive(Default, Debug)]
 pub(super) struct PrimitiveSchemaShape {
@@ -167,9 +168,10 @@ impl PrimitiveSchemaShape {
         metadata: &crate::actions::Metadata,
         root_bytes: usize,
     ) -> Option<usize> {
-        use crate::schema::{StructField, StructType};
         use std::borrow::Cow;
         use std::collections::HashMap;
+
+        use crate::schema::{StructField, StructType};
         let schema_owner = vector_peak::<(usize, String, StructField)>(self.fields)?
             .checked_add(hash_peak::<usize>(self.fields)?)?
             .checked_add(self.name_bytes.checked_mul(2)?)?
@@ -510,8 +512,9 @@ impl<'de> Visitor<'de> for EmptyMetadata<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::cell::Cell;
+
+    use super::*;
     const PRIMITIVE: &str = r#"{"type":"struct","fields":[{"name":"A\u0062","type":"long","nullable":true,"metadata":{}},{"name":"s","type":"string","nullable":false,"metadata":{}}]}"#;
 
     #[test]

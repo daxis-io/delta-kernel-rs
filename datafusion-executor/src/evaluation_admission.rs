@@ -1,16 +1,18 @@
 //! Staged admission for the concrete task host. All arrays remain unconstructed
 //! until the complete execution envelope has been checked and reserved.
-use crate::closed_plan_facts::ClosedPlanFacts;
-use crate::evaluation_page::PageEnvelope;
-use crate::log_input::LogInput;
+use std::mem::size_of;
+use std::sync::Arc;
+
 use datafusion::arrow::datatypes::{FieldRef, Schema, SchemaRef};
 use delta_kernel::engine::arrow_conversion::TryIntoArrow;
 use delta_kernel::plans::ir::nodes::Operator;
 use delta_kernel::tasks::{
     AccountedEngineData, AdmittedPlan, OperationFailure, Resource, ResourceExhausted, TaskLimits,
 };
-use std::mem::size_of;
-use std::sync::Arc;
+
+use crate::closed_plan_facts::ClosedPlanFacts;
+use crate::evaluation_page::PageEnvelope;
+use crate::log_input::LogInput;
 
 pub(crate) struct PreparedEvaluation {
     pub expected: SchemaRef,
