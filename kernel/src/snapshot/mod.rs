@@ -10,7 +10,7 @@ use url::Url;
 
 use crate::action_reconciliation::calculate_transaction_expiration_timestamp;
 use crate::actions::set_transaction::SetTransactionScanner;
-use crate::actions::{DomainMetadata, INTERNAL_DOMAIN_PREFIX};
+use crate::actions::{DomainMetadata, Protocol, INTERNAL_DOMAIN_PREFIX};
 use crate::checkpoint::{
     CheckpointSpec, CheckpointWriter, V2CheckpointConfig, DEFAULT_FILE_ACTIONS_PER_SIDECAR_HINT,
 };
@@ -211,6 +211,23 @@ impl Snapshot {
     ) -> DeltaResult<Self> {
         let pm_start = std::time::Instant::now();
 
+        // A CRC can supply protocol and metadata, but not the file actions needed to construct
+        // a full snapshot. Without a checkpoint, the contiguous commit history must start at 0.
+        if log_segment.checkpoint_version.is_none() {
+            let first_commit = log_segment
+                .listed
+                .ascending_commit_files
+                .first()
+                .map(|path| path.version);
+            require!(
+                first_commit == Some(0),
+                Error::generic(format!(
+                    "Cannot build snapshot: no checkpoint and first commit is {first_commit:?}; \
+                     log appears truncated without a checkpoint"
+                ))
+            );
+        }
+
         // Step 1: read the latest on-disk CRC and, if usable, advance it to the end version
         //         (or use it as-is when already there) per `incremental_replay`.
         let base_crc = log_segment.read_latest_crc(engine);
@@ -386,6 +403,11 @@ impl Snapshot {
     /// Get the [`TableProperties`] for this [`Snapshot`].
     pub fn table_properties(&self) -> &TableProperties {
         self.table_configuration().table_properties()
+    }
+
+    /// Get the table protocol for this snapshot.
+    pub fn protocol(&self) -> &Protocol {
+        self.table_configuration().protocol()
     }
 
     /// Returns the protocol-derived table properties as a map of key-value pairs.

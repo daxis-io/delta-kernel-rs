@@ -633,6 +633,25 @@ async fn test_get_p_m_from_crc_at_target() {
 }
 
 #[tokio::test]
+async fn test_at_version_crc_cannot_hide_truncated_history_without_checkpoint() {
+    let built = CrcReadTest::new()
+        .commit(1, [commit_info("WRITE", None), add("surviving", 100)])
+        .commit(2, [commit_info("WRITE", None)])
+        .crc(2, protocol_a(), metadata_a(), None)
+        .build()
+        .await;
+
+    for version in [Some(2), None] {
+        let mut builder = Snapshot::builder_for(built.url.clone());
+        if let Some(version) = version {
+            builder = builder.at_version(version);
+        }
+        let result = builder.build(&built.engine);
+        assert_result_error_with_message(result, "truncated without a checkpoint");
+    }
+}
+
+#[tokio::test]
 async fn test_crc_preferred_over_delta_at_target() {
     // The P & M for the 002.crc and 002.json should NOT be different in practice.
     // We only do this for this test so we can differentiate which P & M is used.
