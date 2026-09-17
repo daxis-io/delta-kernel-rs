@@ -169,3 +169,9 @@ publishes them by atomically copying them to `_delta_log/`.
 
 For versions after 0, commit types are staged (written to `_staged_commits/`), ratified (accepted
 by the catalog for a version), and published (copied to `_delta_log/` as a normal Delta file).
+
+## FFI schema compatibility
+
+Legacy admissions reject types their unchanged C visitors cannot represent before returning handles
+or writing. V2 schema-only acquisition and fallible raw expression/predicate exports support
+nanosecond schemas through separate handles; nanosecond scalars/nulls remain unsupported.

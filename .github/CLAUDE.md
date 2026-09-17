@@ -67,3 +67,9 @@ env:
 run: |
     echo "Comment: $COMMENT_BODY"
 ```
+
+## FFI feature combinations
+
+Keep ordinary FFI/Miri feature graphs working without Kernel nanosecond support. Also exercise
+`cargo test -p delta_kernel_ffi --locked --features delta_kernel/nanosecond-timestamps` to verify
+dependency feature unification; root workspace `--all-features` enables that Kernel feature too.

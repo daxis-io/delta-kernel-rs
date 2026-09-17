@@ -1,6 +1,15 @@
 //! FFI interface for the delta kernel
 //!
 //! Exposes that an engine needs to call from C/C++ to interface with kernel
+//!
+//! # Schema compatibility
+//! Legacy schema/expression visitors accept only recursively V1-representable types. Fallible
+//! library admissions enforce this before returning legacy handles or performing writes. Rust
+//! callers fabricating legacy schema, snapshot, scan, expression, predicate, transaction or write
+//! context handles must preserve that invariant. Raw-reference V1 visitors have the same unsafe
+//! input precondition. `visit_schema_v2` and the fallible V2 expression/predicate exports preflight
+//! arbitrary inputs and support nanosecond ParseJSON schemas through a distinct V2 schema handle.
+//! Nanosecond scalar values and typed nulls remain unsupported and return typed errors in V2.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 // we re-allow panics in tests
@@ -1036,6 +1045,10 @@ pub unsafe extern "C" fn free_engine(engine: Handle<SharedExternEngine>) {
 #[handle_descriptor(target=Schema, mutable=false, sized=true)]
 pub struct SharedSchema;
 
+/// Schema handle for additive V2 visitors, including nanosecond timestamp types.
+#[handle_descriptor(target=Schema, mutable=false, sized=true)]
+pub struct SharedSchemaV2;
+
 #[handle_descriptor(target=Snapshot, mutable=false, sized=true)]
 pub struct SharedSnapshot;
 
@@ -1275,6 +1288,12 @@ pub unsafe extern "C" fn snapshot_builder_build(
 }
 
 fn snapshot_builder_build_impl(builder: FfiSnapshotBuilder) -> DeltaResult<Handle<SharedSnapshot>> {
+    let snapshot = build_snapshot_rust(builder)?;
+    schema::validate_schema_v1(&snapshot.schema())?;
+    Ok(snapshot.into())
+}
+
+fn build_snapshot_rust(builder: FfiSnapshotBuilder) -> DeltaResult<SnapshotRef> {
     let engine = builder.engine.engine();
     let mut rust_builder = match builder.source {
         FfiSnapshotBuilderSource::TableRoot(url) => Snapshot::builder_for(url),
@@ -1289,8 +1308,37 @@ fn snapshot_builder_build_impl(builder: FfiSnapshotBuilder) -> DeltaResult<Handl
     if let Some(mcv) = builder.max_catalog_version {
         rust_builder = rust_builder.with_max_catalog_version(mcv);
     }
-    let snapshot = rust_builder.build(engine.as_ref())?;
-    Ok(snapshot.into())
+    rust_builder.build(engine.as_ref())
+}
+
+/// Consume a snapshot builder and acquire only its V2 logical schema.
+/// No legacy snapshot handle is exposed. The builder is consumed on success and error.
+/// The returned schema belongs to the caller and must be released with `free_schema_v2`.
+///
+/// # Safety
+/// The builder must be valid and must not be used or freed after this call.
+#[no_mangle]
+pub unsafe extern "C" fn snapshot_builder_build_schema_v2(
+    mut builder: Handle<MutableFfiSnapshotBuilder>,
+) -> ExternResult<Handle<SharedSchemaV2>> {
+    let engine = unsafe { builder.as_mut() }.engine.clone();
+    let builder = unsafe { builder.into_inner() };
+    build_snapshot_rust(*builder)
+        .and_then(|snapshot| {
+            use delta_kernel::transforms::SchemaTransform;
+            schema::SchemaCompatibility(true).transform_struct(&snapshot.schema())?;
+            Ok(snapshot.schema().clone().into())
+        })
+        .into_extern_result(&engine.as_ref())
+}
+
+/// Release a V2 schema handle.
+///
+/// # Safety
+/// The handle must be valid and must not be used or freed afterward.
+#[no_mangle]
+pub unsafe extern "C" fn free_schema_v2(schema: Handle<SharedSchemaV2>) {
+    unsafe { schema.drop_handle() };
 }
 
 /// Free a snapshot builder without building a snapshot (e.g. on an error path).
@@ -1337,8 +1385,8 @@ pub unsafe extern "C" fn checkpoint_snapshot(
     let engine_ref = unsafe { engine.as_ref() };
     let snapshot_ref: SnapshotRef = unsafe { snapshot.clone_as_arc() };
     let kernel_spec = spec.map(|s| s.to_kernel());
-    snapshot_ref
-        .checkpoint(engine_ref.engine().as_ref(), kernel_spec.as_ref())
+    schema::validate_schema_v1(&snapshot_ref.schema())
+        .and_then(|()| snapshot_ref.checkpoint(engine_ref.engine().as_ref(), kernel_spec.as_ref()))
         .map(|(result, updated)| FfiCheckpointWriteResult::from_kernel(result, updated))
         .into_extern_result(&engine_ref)
 }
@@ -1367,8 +1415,8 @@ pub unsafe extern "C" fn snapshot_publish_with_committer(
     let engine_ref = unsafe { engine.as_ref() };
     let snapshot_ref: SnapshotRef = unsafe { snapshot.clone_as_arc() };
     let committer = unsafe { committer.into_inner() };
-    snapshot_ref
-        .publish(engine_ref.engine().as_ref(), committer.as_ref())
+    schema::validate_schema_v1(&snapshot_ref.schema())
+        .and_then(|()| snapshot_ref.publish(engine_ref.engine().as_ref(), committer.as_ref()))
         .map(|updated| updated.into())
         .into_extern_result(&engine_ref)
 }
@@ -2040,6 +2088,90 @@ mod tests {
         collected.sorted_bin_boundaries = unsafe { sorted_bin_boundaries.as_ref() }.to_vec();
         collected.file_counts = unsafe { file_counts.as_ref() }.to_vec();
         collected.total_bytes = unsafe { total_bytes.as_ref() }.to_vec();
+    }
+
+    #[tokio::test]
+    async fn nanosecond_snapshots_are_v2_schema_only_and_legacy_writes_have_no_effects() {
+        if serde_json::from_str::<delta_kernel::schema::DataType>("\"timestamp_nanos\"").is_err() {
+            return;
+        }
+        let schema: delta_kernel::schema::StructType = serde_json::from_value(serde_json::json!({
+            "type":"struct", "fields":[{"name":"nano", "type":"timestamp_nanos",
+                "nullable":false, "metadata":{"tag":"keep"}}]
+        }))
+        .unwrap();
+        let protocol = serde_json::json!({"protocol":{"minReaderVersion":3,"minWriterVersion":7,
+            "readerFeatures":["timestampNanos"],"writerFeatures":["timestampNanos","changeDataFeed"]}});
+        let metadata = serde_json::json!({"metaData":{"id":"nanosecond-ffi-test",
+            "format":{"provider":"parquet","options":{}},
+            "schemaString":serde_json::to_string(&schema).unwrap(), "partitionColumns":[],
+            "configuration":{"delta.enableChangeDataFeed":"true"},"createdTime":0}});
+        let path = "memory:///";
+        let storage = Arc::new(InMemory::new());
+        add_commit(
+            path,
+            storage.as_ref(),
+            0,
+            format!("{protocol}\n{metadata}\n"),
+        )
+        .await
+        .unwrap();
+        let engine = crate::ffi_test_utils::engine_handle_for_store(storage.clone());
+        let original = storage
+            .get(&Path::from("_delta_log/00000000000000000000.json"))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        unsafe {
+            let builder = ok_or_panic(get_snapshot_builder(
+                kernel_string_slice!(path),
+                engine.shallow_copy(),
+            ));
+            assert_extern_result_error_with_message(
+                snapshot_builder_build(builder),
+                KernelError::UnsupportedError,
+                Some("Unsupported: C schema visitor does not support timestamp_nanos"),
+            );
+            let builder = ok_or_panic(get_snapshot_builder(
+                kernel_string_slice!(path),
+                engine.shallow_copy(),
+            ));
+            let handle = ok_or_panic(snapshot_builder_build_schema_v2(builder));
+            assert_eq!(handle.as_ref(), &schema);
+            free_schema_v2(handle);
+            assert_extern_result_error_with_message(
+                transaction::transaction(kernel_string_slice!(path), engine.shallow_copy()),
+                KernelError::UnsupportedError,
+                Some("Unsupported: C schema visitor does not support timestamp_nanos"),
+            );
+            assert_extern_result_error_with_message(
+                table_changes::table_changes_between_versions(
+                    kernel_string_slice!(path),
+                    engine.shallow_copy(),
+                    0,
+                    0,
+                ),
+                KernelError::UnsupportedError,
+                Some("Unsupported: C schema visitor does not support timestamp_nanos"),
+            );
+            free_engine(engine);
+        }
+        assert_eq!(
+            storage
+                .get(&Path::from("_delta_log/00000000000000000000.json"))
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap(),
+            original
+        );
+        assert!(storage
+            .head(&Path::from("_delta_log/00000000000000000001.json"))
+            .await
+            .is_err());
     }
 
     #[test]

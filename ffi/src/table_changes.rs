@@ -80,7 +80,9 @@ fn table_changes_impl(
         start_version,
         end_version,
     );
-    Ok(Box::new(table_changes?).into())
+    let table_changes = table_changes?;
+    crate::schema::validate_schema_v1(table_changes.schema())?;
+    Ok(Box::new(table_changes).into())
 }
 
 /// Drops table changes.
@@ -175,10 +177,16 @@ fn table_changes_scan_impl(
         let mut visitor_state = KernelExpressionVisitorState::default();
         let pred_id = (predicate.visitor)(predicate.predicate, &mut visitor_state);
         let predicate = unwrap_kernel_predicate(&mut visitor_state, pred_id);
+        if let Some(predicate) = &predicate {
+            crate::expressions::engine_visitor::validate_predicate_v1(predicate)?;
+        }
         debug!("Table changes got predicate: {:#?}", predicate);
         scan_builder = scan_builder.with_predicate(predicate.map(Arc::new));
     }
-    Ok(Arc::new(scan_builder.build()?).into())
+    let scan = scan_builder.build()?;
+    crate::schema::validate_schema_v1(scan.logical_schema())?;
+    crate::schema::validate_schema_v1(scan.physical_schema())?;
+    Ok(Arc::new(scan).into())
 }
 
 /// Drops a table changes scan.

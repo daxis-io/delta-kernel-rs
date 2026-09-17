@@ -726,6 +726,7 @@ fn visit_engine_expression_impl(
         ))
     })?;
 
+    super::engine_visitor::validate_expression_v1(&expr)?;
     Ok(Arc::new(expr).into())
 }
 
@@ -756,6 +757,7 @@ fn visit_engine_predicate_impl(
         ))
     })?;
 
+    super::engine_visitor::validate_predicate_v1(&pred)?;
     Ok(Arc::new(pred).into())
 }
 
